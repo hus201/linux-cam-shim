@@ -1,0 +1,53 @@
+[package]
+name = "cam-shim"
+version = "0.1.0"
+edition = "2021"
+description = "Linux webcam compatibility shim — normalizes fps via v4l2loopback"
+license = "MIT"
+readme = "Readme.md"
+authors = ["cam-shim contributors"]
+
+[[bin]]
+name = "cam-shim"
+path = "src/main.rs"
+
+[package.metadata.deb]
+revision = ""
+maintainer = "cam-shim contributors"
+copyright = "2026, cam-shim contributors"
+license-file = ["LICENSE", "4"]
+section = "video"
+priority = "optional"
+depends = "$auto, kmod, udev"
+recommends = "v4l-utils, systemd"
+suggests = "v4l2loopback-dkms | v4l2loopback-modules-dkms | v4l2loopback-modules, v4l2loopback-utils, psmisc"
+extended-description = """\
+cam-shim detects UVC/V4L2 webcams that advertise non-standard frame rates
+(e.g. 25 fps only) and exposes a virtual Linux Standardized camera via
+v4l2loopback. The serve mode runs continuously and manages shims automatically
+when incompatible cameras are plugged in."""
+assets = [
+    ["target/release/cam-shim", "usr/bin/", "755"],
+    ["packaging/cam-shim.service", "usr/lib/systemd/system/cam-shim.service", "644"],
+    ["packaging/modprobe.d/cam-shim-v4l2loopback.conf", "etc/modprobe.d/cam-shim-v4l2loopback.conf", "644"],
+    ["Readme.md", "usr/share/doc/cam-shim/README", "644"],
+    ["LICENSE", "usr/share/doc/cam-shim/copyright", "644"],
+]
+maintainer-scripts = "packaging/deb/"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctrlc = "3.4"
+v4l = "0.14"
+libc = "0.2"
+udev = "0.9"
+
+[profile.release]
+lto = true
+codegen-units = 1

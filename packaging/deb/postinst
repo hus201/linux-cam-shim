@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        echo ""
+        echo "cam-shim installed."
+        echo "  Scan cameras:     cam-shim scan"
+        echo "  Run daemon:       sudo cam-shim serve"
+        echo "  Enable on boot:   sudo systemctl enable --now cam-shim"
+        echo ""
+        echo "v4l2loopback is configured via /etc/modprobe.d/cam-shim-v4l2loopback.conf"
+        echo "(exclusive_caps=1). Load the module with:"
+        echo "  sudo modprobe v4l2loopback"
+        echo ""
+        if [ -d /sys/module/v4l2loopback ]; then
+            echo "Note: v4l2loopback is already loaded. To apply exclusive_caps=1, close"
+            echo "apps using virtual cameras, then run:"
+            echo "  sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback"
+            echo ""
+        fi
+        echo "Many recent kernels include v4l2loopback in-tree — you may not need"
+        echo "v4l2loopback-dkms. Do not install the Ubuntu DKMS package on kernel 7.x"
+        echo "unless you know you need it; it often fails to build."
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,16 @@
+[Unit]
+Description=Linux webcam compatibility shim (cam-shim)
+Documentation=https://github.com/linux-cam-shim
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cam-shim serve
+Restart=on-failure
+RestartSec=3
+# Needs root for v4l2loopback, udev hide rules, and device nodes
+User=root
+
+[Install]
+WantedBy=multi-user.target
