@@ -1,6 +1,6 @@
-use std::ffi::CString;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -536,10 +536,9 @@ pub fn clean_loopback_devices(all: bool, force: bool) -> Result<CleanReport> {
                 holders,
             }),
             Err(err) if is_gone_error(&err) && !loopback_sysfs_exists(device.index) => {
-                report.removed.push(format!(
-                    "{} ({}) [already gone]",
-                    device.path, device.name
-                ));
+                report
+                    .removed
+                    .push(format!("{} ({}) [already gone]", device.path, device.name));
             }
             Err(err) => report.failed.push(CleanFailure {
                 path: device.path.clone(),
@@ -553,7 +552,9 @@ pub fn clean_loopback_devices(all: bool, force: bool) -> Result<CleanReport> {
 }
 
 pub fn unload_loopback_module() -> Result<()> {
-    let status = Command::new("modprobe").args(["-r", "v4l2loopback"]).status()?;
+    let status = Command::new("modprobe")
+        .args(["-r", "v4l2loopback"])
+        .status()?;
     if !status.success() {
         return Err(CamShimError::Io(io::Error::other(
             "failed to unload v4l2loopback (is a virtual camera still open?)",
@@ -657,9 +658,10 @@ pub fn build_video_device_holder_map() -> HashMap<String, Vec<DeviceHolder>> {
                 continue;
             }
 
-            map.entry(path_key)
-                .or_default()
-                .push(DeviceHolder { pid, label: label.clone() });
+            map.entry(path_key).or_default().push(DeviceHolder {
+                pid,
+                label: label.clone(),
+            });
         }
     }
 
@@ -768,11 +770,7 @@ pub fn loopback_consumer_count(device_path: &str) -> Option<u32> {
     if !sysfs.is_file() {
         return None;
     }
-    fs::read_to_string(sysfs)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    fs::read_to_string(sysfs).ok()?.trim().parse().ok()
 }
 
 /// True when an external app is reading from the virtual camera.
@@ -831,9 +829,7 @@ fn release_device_holders_with_map(
         }
     }
 
-    if Path::new(device_path).exists()
-        && Command::new("fuser").arg("--version").output().is_ok()
-    {
+    if Path::new(device_path).exists() && Command::new("fuser").arg("--version").output().is_ok() {
         for holder in holders_for_device(holder_map, device_path) {
             if holder.pid == own_pid {
                 continue;

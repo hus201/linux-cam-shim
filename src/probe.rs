@@ -94,9 +94,7 @@ fn probe_device(path: &Path, depth: ProbeDepth) -> Result<DeviceReport> {
 
     let caps = dev.query_caps()?;
     if !caps.capabilities.contains(CapFlags::VIDEO_CAPTURE) {
-        return Err(CamShimError::NotCaptureDevice(
-            path.display().to_string(),
-        ));
+        return Err(CamShimError::NotCaptureDevice(path.display().to_string()));
     }
 
     let intervals = match depth {
@@ -314,10 +312,7 @@ fn usb_device_sysfs_key(device_path: &str) -> Option<String> {
 
 /// Prefer capture nodes over metadata; then lowest `/dev/videoN` index.
 fn node_rank(report: &DeviceReport) -> (usize, usize) {
-    let metadata = report
-        .name
-        .to_ascii_lowercase()
-        .contains("metadata");
+    let metadata = report.name.to_ascii_lowercase().contains("metadata");
     let index = video_index(Path::new(&report.path)).unwrap_or(usize::MAX);
     (metadata as usize, index)
 }

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,8 +18,7 @@ use crate::compat::{DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH};
 use crate::error::Result;
 use crate::hide::{
     activate_hide_rules, camera_identity, camera_serial_present, hide_camera_now,
-    repair_video_devices, teardown_hide, visible_capture_path, write_hide_rule_for,
-    CameraIdentity,
+    repair_video_devices, teardown_hide, visible_capture_path, write_hide_rule_for, CameraIdentity,
 };
 use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
@@ -91,6 +90,7 @@ struct ManagedCamera {
     worker: JoinHandle<()>,
 }
 
+#[derive(Default)]
 struct SerialState {
     consecutive_failures: u32,
     quarantined_until: Option<Instant>,
@@ -125,10 +125,7 @@ impl SerialState {
     }
 
     fn can_start(&self, now: Instant) -> bool {
-        if self
-            .quarantined_until
-            .is_some_and(|until| now < until)
-        {
+        if self.quarantined_until.is_some_and(|until| now < until) {
             return false;
         }
 
@@ -140,8 +137,7 @@ impl SerialState {
     }
 
     fn is_quarantined(&self, now: Instant) -> bool {
-        self.quarantined_until
-            .is_some_and(|until| now < until)
+        self.quarantined_until.is_some_and(|until| now < until)
     }
 }
 
@@ -182,9 +178,7 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
             shutdown.store(true, Ordering::SeqCst);
         })
         .map_err(|err| {
-            crate::error::CamShimError::Io(std::io::Error::other(format!(
-                "ctrl-c handler: {err}"
-            )))
+            crate::error::CamShimError::Io(std::io::Error::other(format!("ctrl-c handler: {err}")))
         })?;
     }
 
@@ -282,9 +276,7 @@ impl Supervisor {
         let stale: Vec<String> = self
             .managed
             .keys()
-            .filter(|serial| {
-                !active_serials.contains(*serial) && !camera_serial_present(serial)
-            })
+            .filter(|serial| !active_serials.contains(*serial) && !camera_serial_present(serial))
             .cloned()
             .collect();
 
@@ -372,8 +364,7 @@ impl Supervisor {
             .iter()
             .filter(|(_, camera)| {
                 !camera.worker.is_finished()
-                    && heartbeat_age(camera.heartbeat.load(Ordering::Relaxed))
-                        > stale_timeout
+                    && heartbeat_age(camera.heartbeat.load(Ordering::Relaxed)) > stale_timeout
             })
             .map(|(serial, _)| serial.clone())
             .collect();
@@ -391,16 +382,6 @@ impl Supervisor {
                     .or_default()
                     .record_failure(config);
             }
-        }
-    }
-}
-
-impl Default for SerialState {
-    fn default() -> Self {
-        Self {
-            consecutive_failures: 0,
-            quarantined_until: None,
-            retry_after: None,
         }
     }
 }
@@ -583,7 +564,8 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
     let worker = thread::spawn(move || {
         let on_ready = hide_identity.map(|identity| move || hide_physical_camera(&identity));
 
-        if let Err(err) = run_shim_until(shim_config, worker_stop, on_ready, Some(worker_heartbeat)) {
+        if let Err(err) = run_shim_until(shim_config, worker_stop, on_ready, Some(worker_heartbeat))
+        {
             tracing::error!(%err, "shim worker exited with error");
         }
     });

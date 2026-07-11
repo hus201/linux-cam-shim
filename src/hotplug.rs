@@ -11,10 +11,7 @@ use crate::error::Result;
 
 const HOTPLUG_DEBOUNCE: Duration = Duration::from_millis(400);
 
-pub fn spawn_udev_monitor(
-    shutdown: Arc<AtomicBool>,
-    notify: Sender<()>,
-) -> Result<JoinHandle<()>> {
+pub fn spawn_udev_monitor(shutdown: Arc<AtomicBool>, notify: Sender<()>) -> Result<JoinHandle<()>> {
     let handle = thread::Builder::new()
         .name("cam-shim-udev".into())
         .spawn(move || run_monitor(shutdown, notify))

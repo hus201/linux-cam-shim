@@ -3,16 +3,16 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use cam_shim::unload_loopback_module;
 use cam_shim::{
     activate_hide_rules, camera_identity, clean_loopback_devices, collect_status, create_device,
     default_shim_config, default_udev_rule_path, ensure_module_loaded, format_holder_list,
-    hide_camera_now, list_device_holders, list_loopback_devices, print_doctor_report, print_status, probe_device_path,
-    restore_all_hidden, run_doctor, run_shim, run_shim_until, run_supervisor, scan_devices,
-    standardized_label, stop_cam_shim_processes, visible_capture_path, write_hide_rule_for,
-    DoctorConfig, FixSession, ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
-    DEFAULT_TARGET_FPS,
+    hide_camera_now, list_device_holders, list_loopback_devices, print_doctor_report, print_status,
+    probe_device_path, restore_all_hidden, run_doctor, run_shim, run_shim_until, run_supervisor,
+    scan_devices, standardized_label, stop_cam_shim_processes, visible_capture_path,
+    write_hide_rule_for, DoctorConfig, FixSession, ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT,
+    DEFAULT_MAX_CAPTURE_WIDTH, DEFAULT_TARGET_FPS,
 };
-use cam_shim::unload_loopback_module;
 
 #[derive(Parser)]
 #[command(
@@ -444,7 +444,9 @@ fn cmd_restore(clean_loopback: bool) -> anyhow::Result<()> {
         if hidden > 0 {
             println!("Warning: {hidden} camera node(s) still hidden under /dev/cam-shim-hidden/.");
         } else {
-            println!("Device nodes repaired. If the camera still does not appear, unplug and replug it.");
+            println!(
+                "Device nodes repaired. If the camera still does not appear, unplug and replug it."
+            );
         }
     }
 

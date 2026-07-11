@@ -2,6 +2,8 @@
 
 Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **Linux Standardized** camera via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
 
+> **Proof of concept (POC)** — Experimental software, not a supported product. Behavior, CLI flags, and packaging may change without notice. `serve` and `fix` require **root**, load kernel modules, write udev rules, and can **hide physical camera nodes**. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
+
 ## Naming
 
 | Thing | Name |
@@ -255,7 +257,7 @@ The script repeatedly opens and closes the virtual camera to exercise pause/resu
 
 ## Project status
 
-`scan`, `fix`, and `serve` are usable with v4l2loopback and root. `serve` + systemd is the intended always-on workflow.
+**POC / early stage (v0.1).** `scan`, `fix`, and `serve` work with v4l2loopback and root on tested setups, but compatibility varies by camera, kernel, and desktop apps. `serve` + systemd is the intended always-on workflow once you have validated your hardware. There is no stability guarantee yet.
 
 ## License
 

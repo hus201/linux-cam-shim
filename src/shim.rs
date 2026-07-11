@@ -112,9 +112,8 @@ where
 {
     running.store(true, Ordering::SeqCst);
 
-    let mut target = Device::with_path(&config.target_path).map_err(|_| {
-        CamShimError::DeviceNotFound(config.target_path.clone())
-    })?;
+    let mut target = Device::with_path(&config.target_path)
+        .map_err(|_| CamShimError::DeviceNotFound(config.target_path.clone()))?;
 
     // Open visible node, hide, then negotiate on the post-hide path so the locked
     // loopback format survives close/reopen when capture resumes.
@@ -138,10 +137,9 @@ where
     // v4l2loopback with exclusive_caps=1 only advertises Video Capture after a
     // producer attaches via STREAMON + mmap output. Raw write() does not count.
     let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
-    let mut cap_stream =
-        Stream::with_buffers(&mut source, Type::VideoCapture, CAPTURE_BUFFERS)?;
+    let mut cap_stream = Stream::with_buffers(&source, Type::VideoCapture, CAPTURE_BUFFERS)?;
     let (buffer, meta) = CaptureStream::next(&mut cap_stream).map_err(CamShimError::Io)?;
-    let frame = capture_frame_slice(buffer, &meta)?;
+    let frame = capture_frame_slice(buffer, meta)?;
     loopback_out.prime(frame)?;
 
     if let Some(hb) = heartbeat.as_ref() {
@@ -222,13 +220,8 @@ fn run_capture_session(
         }
 
         let (buffer, meta) = CaptureStream::next(cap_stream).map_err(CamShimError::Io)?;
-        let frame = capture_frame_slice(buffer, &meta)?;
-        submit_loopback_frame(
-            loopback_out,
-            frame,
-            &config.target_path,
-            loopback_format,
-        )?;
+        let frame = capture_frame_slice(buffer, meta)?;
+        submit_loopback_frame(loopback_out, frame, &config.target_path, loopback_format)?;
         if let Some(hb) = heartbeat {
             touch_heartbeat(hb);
         }
@@ -288,8 +281,7 @@ fn idle_wait(
     consumer_gate: &mut ConsumerGate,
 ) {
     tracing::trace!("no virtual camera consumers — physical capture paused");
-    let keepalive_period =
-        Duration::from_millis(1000 / u64::from(IDLE_KEEPALIVE_FPS.max(1)));
+    let keepalive_period = Duration::from_millis(1000 / u64::from(IDLE_KEEPALIVE_FPS.max(1)));
     let mut last_log = Instant::now();
     let mut next_keepalive = Instant::now();
 
@@ -421,11 +413,7 @@ fn pick_sizes_sorted(
         );
     }
 
-    resolutions.sort_by(|a, b| {
-        (b.0 * b.1)
-            .cmp(&(a.0 * a.1))
-            .then_with(|| b.0.cmp(&a.0))
-    });
+    resolutions.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)).then_with(|| b.0.cmp(&a.0)));
     Ok(resolutions)
 }
 
@@ -643,7 +631,7 @@ mod tests {
 
     #[test]
     fn picks_largest_resolution_first() {
-        let mut resolutions = vec![(640, 480), (1920, 1080), (1280, 720)];
+        let mut resolutions = [(640, 480), (1920, 1080), (1280, 720)];
         resolutions.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)).then_with(|| b.0.cmp(&a.0)));
         assert_eq!(resolutions[0], (1920, 1080));
     }
@@ -661,7 +649,7 @@ mod tests {
 
         let mut resolutions = vec![(2560, 1440), (1920, 1080), (1280, 720)];
         resolutions.retain(|(w, h)| resolution_within_cap(*w, *h, limits));
-        resolutions.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)));
+        resolutions.sort_by_key(|b| std::cmp::Reverse(b.0 * b.1));
         assert_eq!(resolutions[0], (1920, 1080));
     }
 

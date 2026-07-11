@@ -226,9 +226,7 @@ fn invalid_state(
         .join(", ");
     CamShimError::Io(io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!(
-            "loopback output cannot {action} in state {current:?} (allowed: {allowed})"
-        ),
+        format!("loopback output cannot {action} in state {current:?} (allowed: {allowed})"),
     ))
 }
 
@@ -251,15 +249,9 @@ mod tests {
     #[test]
     fn state_transition_table() {
         use LoopbackOutputState::*;
-        assert_eq!(
-            next_state(Unprimed, OutputEvent::Prime),
-            Some(Ready)
-        );
+        assert_eq!(next_state(Unprimed, OutputEvent::Prime), Some(Ready));
         assert_eq!(next_state(Ready, OutputEvent::Submit), Some(Streaming));
-        assert_eq!(
-            next_state(Streaming, OutputEvent::Submit),
-            Some(Streaming)
-        );
+        assert_eq!(next_state(Streaming, OutputEvent::Submit), Some(Streaming));
         assert_eq!(next_state(Streaming, OutputEvent::Pause), Some(Ready));
         assert_eq!(next_state(Unprimed, OutputEvent::Submit), None);
         assert_eq!(next_state(Ready, OutputEvent::Pause), None);

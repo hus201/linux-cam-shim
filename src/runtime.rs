@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::hide::{ghost_device_count, hidden_camera_count};
-use crate::loopback::{
-    build_video_device_holder_map, is_cam_shim_loopback, list_loopback_devices,
-};
+use crate::loopback::{build_video_device_holder_map, is_cam_shim_loopback, list_loopback_devices};
 use crate::probe::{scan_devices_sysfs, DeviceReport};
 
 pub const STATE_FILE: &str = "/run/cam-shim/state.json";

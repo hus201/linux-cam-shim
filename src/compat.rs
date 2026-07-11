@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use v4l::frameinterval::{FrameInterval, FrameIntervalEnum};
 use v4l::fraction::Fraction;
+use v4l::frameinterval::{FrameInterval, FrameIntervalEnum};
 
 pub const STANDARDIZED_SUFFIX: &str = " - Linux Standardized";
 pub const DEFAULT_TARGET_FPS: u32 = 30;

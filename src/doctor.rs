@@ -8,7 +8,7 @@ use crate::loopback::{
 };
 use crate::runtime::{
     age_ms_since, collect_runtime_snapshot, heartbeat_age_secs, heartbeat_is_stale,
-    RuntimeSnapshot, STATE_FILE, HEARTBEAT_STALE_SECS,
+    RuntimeSnapshot, HEARTBEAT_STALE_SECS, STATE_FILE,
 };
 use crate::session::restore_all_hidden;
 
@@ -234,7 +234,8 @@ fn diagnose(snapshot: &RuntimeSnapshot) -> Vec<String> {
             ));
         }
 
-        let state_fresh = age_ms_since(state.updated_at_ms) <= HEARTBEAT_STALE_SECS.saturating_mul(1000);
+        let state_fresh =
+            age_ms_since(state.updated_at_ms) <= HEARTBEAT_STALE_SECS.saturating_mul(1000);
         if state_fresh {
             for camera in &state.managed {
                 if camera.quarantined {
@@ -255,7 +256,7 @@ fn diagnose(snapshot: &RuntimeSnapshot) -> Vec<String> {
     issues
 }
 
-fn build_recommendations(snapshot: &RuntimeSnapshot, issues: &Vec<String>) -> Vec<String> {
+fn build_recommendations(snapshot: &RuntimeSnapshot, issues: &[String]) -> Vec<String> {
     let mut out = Vec::new();
 
     if snapshot.hidden_cameras > 0 {
@@ -309,7 +310,10 @@ fn print_snapshot(title: &str, snapshot: &RuntimeSnapshot) {
             "not running"
         }
     );
-    println!("  visible capture devices: {}", snapshot.visible_capture_devices);
+    println!(
+        "  visible capture devices: {}",
+        snapshot.visible_capture_devices
+    );
     println!("  needs shim: {}", snapshot.needs_shim_devices);
     println!("  hidden cameras: {}", snapshot.hidden_cameras);
     println!("  ghost nodes: {}", snapshot.ghost_nodes);
@@ -319,7 +323,11 @@ fn print_snapshot(title: &str, snapshot: &RuntimeSnapshot) {
     } else {
         println!("  loopback devices:");
         for loopback in &snapshot.loopbacks {
-            let tag = if loopback.cam_shim { "cam-shim" } else { "other" };
+            let tag = if loopback.cam_shim {
+                "cam-shim"
+            } else {
+                "other"
+            };
             if loopback.holders.is_empty() {
                 println!("    {} — {} [{tag}]", loopback.path, loopback.name);
             } else {
@@ -369,7 +377,10 @@ fn print_actions(actions: &DoctorActions) {
         println!("  restored: {}", actions.restored_hidden.join(", "));
     }
     if !actions.ghosts_removed.is_empty() {
-        println!("  removed ghost nodes: {}", actions.ghosts_removed.join(", "));
+        println!(
+            "  removed ghost nodes: {}",
+            actions.ghosts_removed.join(", ")
+        );
     }
     if !actions.stale_hidden_removed.is_empty() {
         println!(
@@ -399,16 +410,17 @@ fn print_actions(actions: &DoctorActions) {
 
 fn loopback_held_by_others(snapshot: &RuntimeSnapshot) -> bool {
     let own_pid = std::process::id();
-    snapshot.loopbacks.iter().any(|loopback| {
-        loopback
-            .holders
-            .iter()
-            .any(|holder| holder.pid != own_pid)
-    })
+    snapshot
+        .loopbacks
+        .iter()
+        .any(|loopback| loopback.holders.iter().any(|holder| holder.pid != own_pid))
 }
 
 fn v4l2_list_devices_output() -> Option<String> {
-    let output = Command::new("v4l2-ctl").arg("--list-devices").output().ok()?;
+    let output = Command::new("v4l2-ctl")
+        .arg("--list-devices")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

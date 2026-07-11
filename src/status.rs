@@ -4,11 +4,11 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::loopback::loopback_consumer_count;
-use crate::runtime::{
-    age_ms_since, collect_runtime_snapshot, heartbeat_age_secs, heartbeat_is_stale,
-    ProcessHolder, RuntimeSnapshot, STATE_FILE, HEARTBEAT_STALE_SECS,
-};
 use crate::probe::DeviceReport;
+use crate::runtime::{
+    age_ms_since, collect_runtime_snapshot, heartbeat_age_secs, heartbeat_is_stale, ProcessHolder,
+    RuntimeSnapshot, HEARTBEAT_STALE_SECS, STATE_FILE,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusReport {
@@ -193,7 +193,9 @@ fn loopback_status(snapshot: &RuntimeSnapshot) -> Vec<LoopbackStatus> {
 
 fn print_state_file(report: &StatusReport) {
     if !report.state_present {
-        println!("State:    {STATE_FILE} (missing — serve not running or started with --no-state-file)");
+        println!(
+            "State:    {STATE_FILE} (missing — serve not running or started with --no-state-file)"
+        );
         return;
     }
 
@@ -265,7 +267,11 @@ fn print_loopbacks(report: &StatusReport) {
 
     println!("Loopback devices");
     for loopback in &report.loopbacks {
-        let tag = if loopback.cam_shim { "cam-shim" } else { "other" };
+        let tag = if loopback.cam_shim {
+            "cam-shim"
+        } else {
+            "other"
+        };
         let readers = loopback
             .active_readers
             .map(|count| format!(", readers: {count}"))

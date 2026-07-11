@@ -21,14 +21,12 @@ pub struct CameraIdentity {
 
 /// USB serial from udev for a `/dev/video*` node (used to dedupe multi-node webcams).
 pub fn device_id_serial(device_path: &str) -> Option<String> {
-    udev_properties(device_path)
-        .ok()
-        .and_then(|props| {
-            props
-                .get("ID_SERIAL")
-                .or_else(|| props.get("ID_SERIAL_SHORT"))
-                .cloned()
-        })
+    udev_properties(device_path).ok().and_then(|props| {
+        props
+            .get("ID_SERIAL")
+            .or_else(|| props.get("ID_SERIAL_SHORT"))
+            .cloned()
+    })
 }
 
 pub fn camera_identity(source_device: &str) -> Result<CameraIdentity> {
@@ -143,10 +141,11 @@ pub struct RestoreReport {
 }
 
 pub fn repair_video_devices() -> Result<RestoreReport> {
-    let mut report = RestoreReport::default();
-    report.restored = restore_hidden_cameras()?;
-    report.ghosts_removed = remove_ghost_device_nodes()?;
-    report.stale_hidden_removed = drop_stale_hidden_nodes()?;
+    let report = RestoreReport {
+        restored: restore_hidden_cameras()?,
+        ghosts_removed: remove_ghost_device_nodes()?,
+        stale_hidden_removed: drop_stale_hidden_nodes()?,
+    };
     if !report.restored.is_empty()
         || !report.ghosts_removed.is_empty()
         || !report.stale_hidden_removed.is_empty()
@@ -161,9 +160,7 @@ pub fn ghost_device_count() -> Result<usize> {
 }
 
 fn sysfs_video_exists(name: &str) -> bool {
-    Path::new("/sys/class/video4linux")
-        .join(name)
-        .exists()
+    Path::new("/sys/class/video4linux").join(name).exists()
 }
 
 fn is_ghost_device_node(path: &Path) -> bool {
@@ -241,11 +238,7 @@ fn drop_stale_hidden_nodes() -> Result<Vec<String>> {
 
 fn trigger_video_devices() {
     let _ = Command::new("udevadm")
-        .args([
-            "trigger",
-            "--subsystem-match=video4linux",
-            "--action=add",
-        ])
+        .args(["trigger", "--subsystem-match=video4linux", "--action=add"])
         .status();
     // Do not block indefinitely — settle alone can take minutes on busy systems.
     let _ = Command::new("udevadm")
@@ -299,12 +292,7 @@ pub fn hidden_camera_count() -> Result<usize> {
 
     Ok(fs::read_dir(hidden_dir)?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("video")
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("video"))
         .count())
 }
 
