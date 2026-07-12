@@ -1,6 +1,6 @@
 [package]
 name = "cam-shim"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Linux webcam compatibility shim — normalizes fps via v4l2loopback"
 license = "MIT"

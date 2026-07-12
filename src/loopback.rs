@@ -166,6 +166,21 @@ fn create_with_ctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     })
 }
 
+/// Prefer `/dev/video10+` so physical UVC devices keep low numbers when they
+/// reappear after unhide/replug. Does not remove or rename other apps' devices.
+const PREFERRED_LOOPBACK_NR_START: i32 = 10;
+const PREFERRED_LOOPBACK_NR_END: i32 = 63;
+
+fn preferred_loopback_output_nr() -> i32 {
+    for nr in PREFERRED_LOOPBACK_NR_START..=PREFERRED_LOOPBACK_NR_END {
+        let sysfs = format!("/sys/class/video4linux/video{nr}");
+        if fs::metadata(&sysfs).is_err() {
+            return nr;
+        }
+    }
+    -1
+}
+
 fn create_with_ioctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     let path = CString::new("/dev/v4l2loopback").map_err(|_| {
         CamShimError::Io(io::Error::other("invalid v4l2loopback control device path"))
@@ -180,7 +195,7 @@ fn create_with_ioctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     }
 
     let mut config = V4l2LoopbackConfig {
-        output_nr: -1,
+        output_nr: preferred_loopback_output_nr(),
         unused: -1,
         card_label: kernel_card_label_bytes(label),
         min_width: 0,
@@ -194,6 +209,13 @@ fn create_with_ioctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     };
 
     let result = unsafe { ioctl(fd, V4L2LOOPBACK_CTL_ADD, &mut config) };
+    // If the preferred number was rejected, let the kernel pick any free slot.
+    let result = if result < 0 && config.output_nr >= 0 {
+        config.output_nr = -1;
+        unsafe { ioctl(fd, V4L2LOOPBACK_CTL_ADD, &mut config) }
+    } else {
+        result
+    };
     unsafe { libc::close(fd) };
 
     if result < 0 {
@@ -481,6 +503,7 @@ pub fn clean_loopback_devices(all: bool, force: bool) -> Result<CleanReport> {
     let mut holder_map = build_video_device_holder_map();
 
     for device in devices {
+        // Default: only our devices. Never touch OBS/other virtual cameras unless --all.
         if !all && !is_cam_shim_loopback(&device.name) {
             report
                 .skipped
@@ -867,7 +890,8 @@ fn is_gone_error(err: &CamShimError) -> bool {
 fn busy_reason(device_path: &str, holders: &[DeviceHolder]) -> String {
     if holders.is_empty() {
         return format!(
-            "{device_path} is in use — stop cam-shim/fix or run `cam-shim clean --force`"
+            "{device_path} is in use — close apps using it, or run \
+             `cam-shim clean --force --reload` (module reload clears stuck loopbacks)"
         );
     }
 
@@ -1003,6 +1027,13 @@ mod tests {
         assert!(is_cam_shim_loopback("webcam: Fantech Luminous C30 -"));
         assert!(is_cam_shim_loopback("Linux Standardized Camera"));
         assert!(!is_cam_shim_loopback("OBS Virtual Camera"));
+        assert!(!is_cam_shim_loopback("Dummy video device (0x0000)"));
+    }
+
+    #[test]
+    fn prefers_high_loopback_numbers() {
+        let nr = preferred_loopback_output_nr();
+        assert!(nr == -1 || nr >= PREFERRED_LOOPBACK_NR_START);
     }
 
     #[test]

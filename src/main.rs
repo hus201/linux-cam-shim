@@ -17,6 +17,7 @@ use cam_shim::{
 #[derive(Parser)]
 #[command(
     name = "cam-shim",
+    version,
     about = "Linux webcam compatibility shim",
     long_about = "Detects incompatible UVC/V4L2 webcams and exposes a standardized virtual camera."
 )]
@@ -27,6 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print version and exit
+    Version,
     /// List cameras and compatibility status
     Scan {
         /// Emit JSON instead of a human-readable table
@@ -188,6 +191,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Version => {
+            println!("cam-shim {}", env!("CARGO_PKG_VERSION"));
+        }
         Commands::Scan { json } => cmd_scan(json)?,
         Commands::Fix {
             device,
@@ -420,6 +426,23 @@ fn cmd_fix(device: &str, target_fps: u32, no_hide: bool, no_cleanup: bool) -> an
 }
 
 fn cmd_restore(clean_loopback: bool) -> anyhow::Result<()> {
+    // Remove only cam-shim loopbacks before unhiding — leave other apps' virtual cams alone.
+    if clean_loopback {
+        let report = clean_loopback_devices(false, true)?;
+        for path in &report.removed {
+            println!("Removed loopback {path}");
+        }
+        for failure in &report.failed {
+            println!("Failed to remove {}: {}", failure.path, failure.reason);
+            if failure.reason.contains("--reload") {
+                println!("  tip: sudo cam-shim clean --force --reload");
+            }
+        }
+        for path in &report.skipped {
+            println!("Left alone {path}");
+        }
+    }
+
     let report = restore_all_hidden()?;
     println!("Removed cam-shim udev rules.");
 
@@ -450,16 +473,6 @@ fn cmd_restore(clean_loopback: bool) -> anyhow::Result<()> {
         }
     }
 
-    if clean_loopback {
-        let report = clean_loopback_devices(true, true)?;
-        for path in &report.removed {
-            println!("Removed loopback {path}");
-        }
-        for failure in &report.failed {
-            println!("Failed to remove {}: {}", failure.path, failure.reason);
-        }
-    }
-
     Ok(())
 }
 
@@ -467,11 +480,12 @@ fn cmd_install(_udev_rule: &PathBuf) -> anyhow::Result<()> {
     ensure_module_loaded()?;
     println!("Loaded v4l2loopback module.");
     println!();
-    println!("Run as a continuous daemon:");
+    println!("Run as a continuous daemon (recommended while early-stage):");
     println!("  sudo cam-shim serve");
     println!();
-    println!("Or install the systemd unit:");
+    println!("Optional systemd unit (disabled by default; enable only after serve works):");
     println!("  sudo cp packaging/cam-shim.service /etc/systemd/system/");
+    println!("  sudo systemctl daemon-reload");
     println!("  sudo systemctl enable --now cam-shim");
     Ok(())
 }

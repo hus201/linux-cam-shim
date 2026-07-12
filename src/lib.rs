@@ -21,10 +21,10 @@ pub use doctor::{print_doctor_report, run_doctor, DoctorConfig, DoctorReport};
 pub use error::{CamShimError, Result};
 pub use hide::{
     activate_hide_rules, camera_identity, camera_serial_present, default_udev_rule_path,
-    ghost_device_count, hidden_camera_count, hide_camera_now, install_hide_rule,
-    install_hide_rule_for, remove_all_hide_rules, repair_video_devices, resolve_device_path,
-    restore_hidden_cameras, teardown_hide, udev_rule_path_for_serial, visible_capture_path,
-    write_hide_rule_for, CameraIdentity, RestoreReport,
+    ghost_device_count, hidden_camera_count, hidden_video_names, hide_camera_now,
+    install_hide_rule, install_hide_rule_for, remove_all_hide_rules, repair_video_devices,
+    resolve_device_path, restore_hidden_cameras, teardown_hide, udev_rule_path_for_serial,
+    visible_capture_path, write_hide_rule_for, CameraIdentity, RestoreReport,
 };
 pub use loopback::{
     clean_loopback_devices, create_device, ensure_module_loaded, find_device_holders,

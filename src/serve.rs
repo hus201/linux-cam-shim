@@ -18,7 +18,8 @@ use crate::compat::{DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH};
 use crate::error::Result;
 use crate::hide::{
     activate_hide_rules, camera_identity, camera_serial_present, hide_camera_now,
-    repair_video_devices, teardown_hide, visible_capture_path, write_hide_rule_for, CameraIdentity,
+    repair_video_devices, resolve_device_path, teardown_hide, visible_capture_path,
+    write_hide_rule_for, CameraIdentity,
 };
 use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
@@ -82,6 +83,7 @@ struct ShimCandidate {
 }
 
 struct ManagedCamera {
+    source_path: String,
     loopback_index: u32,
     loopback_path: String,
     udev_rule: Option<PathBuf>,
@@ -288,9 +290,30 @@ impl Supervisor {
             }
         }
 
-        for candidate in candidates {
-            if self.managed.contains_key(&candidate.serial) {
-                continue;
+        for candidate in &candidates {
+            let restart = match self.managed.get(&candidate.serial) {
+                Some(camera) if managed_source_stale(camera, candidate) => {
+                    tracing::info!(
+                        serial = %candidate.serial,
+                        old = %camera.source_path,
+                        new = %candidate.source_path,
+                        "camera path changed — restarting shim"
+                    );
+                    true
+                }
+                Some(_) => continue,
+                None => false,
+            };
+
+            if restart {
+                if let Some(camera) = self.managed.remove(&candidate.serial) {
+                    stop_managed(camera);
+                }
+                // Restore/replug should not inherit prior backoff/quarantine.
+                self.serial_states
+                    .entry(candidate.serial.clone())
+                    .or_default()
+                    .record_success();
             }
 
             let state = self
@@ -300,14 +323,14 @@ impl Supervisor {
 
             if !state.can_start(now) {
                 if state.is_quarantined(now) {
-                    tracing::debug!(serial = %candidate.serial, "skipping quarantined camera");
+                    tracing::warn!(serial = %candidate.serial, "skipping quarantined camera");
                 } else {
-                    tracing::debug!(serial = %candidate.serial, "waiting for restart backoff");
+                    tracing::info!(serial = %candidate.serial, "waiting for restart backoff");
                 }
                 continue;
             }
 
-            match start_managed(&candidate, config) {
+            match start_managed(candidate, config) {
                 Ok(camera) => {
                     tracing::info!(
                         serial = %candidate.serial,
@@ -474,21 +497,24 @@ fn write_state_snapshot(supervisor: &Supervisor, now: Instant) -> Result<()> {
 
 fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate>> {
     let mut by_serial: HashMap<String, ShimCandidate> = HashMap::new();
-    let depth = if skip_paths.is_empty() {
-        ProbeDepth::Full
-    } else {
-        ProbeDepth::Quick
-    };
 
-    for report in scan_devices_with_options(depth, skip_paths)? {
+    // Always fully probe free devices. Held paths are already sysfs-only via
+    // skip_paths — Quick mode only inspected the current format and often
+    // mis-labeled NeedsShim cameras as Compatible after the first shim started.
+    for report in scan_devices_with_options(ProbeDepth::Full, skip_paths)? {
         if !report.needs_shim {
+            tracing::debug!(
+                path = %report.path,
+                name = %report.name,
+                "skipping compatible camera"
+            );
             continue;
         }
 
         let identity = match camera_identity(&report.path) {
             Ok(id) => id,
             Err(err) => {
-                tracing::debug!(path = %report.path, %err, "skipping device without serial");
+                tracing::warn!(path = %report.path, %err, "skipping device without serial");
                 continue;
             }
         };
@@ -520,6 +546,17 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
     Ok(by_serial.into_values().collect())
 }
 
+fn managed_source_stale(camera: &ManagedCamera, candidate: &ShimCandidate) -> bool {
+    let managed = resolve_device_path(&camera.source_path);
+    if !std::path::Path::new(&managed).exists() {
+        return true;
+    }
+
+    let managed_name = std::path::Path::new(&managed).file_name();
+    let candidate_name = std::path::Path::new(&candidate.source_path).file_name();
+    managed_name != candidate_name
+}
+
 fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<ManagedCamera> {
     let loopback = create_device(&candidate.label, config.target_fps)?;
     let loopback_index = loopback
@@ -546,6 +583,7 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
     let worker_stop = stop.clone();
     let heartbeat = Arc::new(AtomicU64::new(now_unix_ms()));
     let worker_heartbeat = heartbeat.clone();
+    let source_path = capture_path.clone();
     let shim_config = ShimConfig {
         source_path: capture_path,
         target_path: loopback.path.clone(),
@@ -571,6 +609,7 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
     });
 
     Ok(ManagedCamera {
+        source_path,
         loopback_index,
         loopback_path: loopback.path,
         udev_rule,

@@ -30,6 +30,19 @@ pub fn device_id_serial(device_path: &str) -> Option<String> {
 }
 
 pub fn camera_identity(source_device: &str) -> Result<CameraIdentity> {
+    match camera_identity_from_udev(source_device) {
+        Ok(identity) => Ok(identity),
+        Err(first_err) => {
+            // Freshly restored/renamed nodes can briefly lack udev properties.
+            let _ = Command::new("udevadm")
+                .args(["settle", "--timeout=2"])
+                .status();
+            camera_identity_from_udev(source_device).map_err(|_| first_err)
+        }
+    }
+}
+
+fn camera_identity_from_udev(source_device: &str) -> Result<CameraIdentity> {
     let props = udev_properties(source_device)?;
     let id_serial = props
         .get("ID_SERIAL")
@@ -175,6 +188,10 @@ fn is_ghost_device_node(path: &Path) -> bool {
     !sysfs_video_exists(name)
 }
 
+fn is_loopback_video_name(name: &str) -> bool {
+    is_loopback_sysfs_node(&Path::new("/sys/class/video4linux").join(name))
+}
+
 fn count_ghost_device_nodes() -> Result<Vec<String>> {
     let mut ghosts = Vec::new();
 
@@ -221,7 +238,9 @@ fn drop_stale_hidden_nodes() -> Result<Vec<String>> {
             continue;
         }
 
-        if sysfs_video_exists(&name) {
+        // A loopback occupying videoN means the original physical node is gone from
+        // that number (often re-enumerated higher). Drop the stale hidden node.
+        if sysfs_video_exists(&name) && !is_loopback_video_name(&name) {
             continue;
         }
 
@@ -285,15 +304,30 @@ pub fn resolve_device_path(path: &str) -> String {
 }
 
 pub fn hidden_camera_count() -> Result<usize> {
+    Ok(hidden_video_names()?.len())
+}
+
+/// Basenames (`video0`, `video1`, …) currently under `/dev/cam-shim-hidden/`.
+pub fn hidden_video_names() -> Result<Vec<String>> {
     let hidden_dir = Path::new(HIDDEN_DIR);
     if !hidden_dir.is_dir() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    Ok(fs::read_dir(hidden_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("video"))
-        .count())
+    let mut names = Vec::new();
+    for entry in fs::read_dir(hidden_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("video") && name[5..].chars().all(|c| c.is_ascii_digit()) {
+            names.push(name.into_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 pub fn restore_hidden_cameras() -> Result<Vec<String>> {
@@ -319,10 +353,12 @@ pub fn restore_hidden_cameras() -> Result<Vec<String>> {
 
         let dest = Path::new("/dev").join(&*name);
 
-        if !sysfs_video_exists(&name) {
+        // Loopback can reuse a videoN name after the physical camera re-enumerated.
+        // Only restore when sysfs still points at a real (non-loopback) device.
+        if !sysfs_video_exists(&name) || is_loopback_video_name(&name) {
             tracing::warn!(
                 name = %name,
-                "skipping hidden node restore — no matching sysfs device"
+                "skipping hidden node restore — no matching physical sysfs device"
             );
             continue;
         }

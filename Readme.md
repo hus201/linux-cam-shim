@@ -42,6 +42,12 @@ Install:
 
 ```bash
 sudo dpkg -i target/debian/cam-shim_*_amd64.deb
+sudo cam-shim serve
+```
+
+The `.deb` installs a systemd unit but does **not** enable or start it. Use `sudo cam-shim serve` first to validate your camera; enable the service only once that looks solid:
+
+```bash
 sudo systemctl enable --now cam-shim
 ```
 
@@ -86,21 +92,20 @@ The supervisor includes:
 
 Tuning flags: `--max-failures`, `--quarantine-secs`, `--backoff-ms`, `--stale-frame-secs`, `--watchdog-secs`, `--no-state-file`, `--max-width`, `--max-height`
 
-**Install as a systemd service** (starts on boot):
+**Optional: systemd** (unit ships with the `.deb`, disabled by default — enable only after `serve` works for you):
 
 ```bash
-./packaging/build-deb.sh
-sudo dpkg -i target/debian/cam-shim_*_amd64.deb
 sudo systemctl enable --now cam-shim
 sudo systemctl status cam-shim
 journalctl -u cam-shim -f
 ```
 
-Or install manually without the `.deb`:
+Or copy the unit manually without the `.deb`:
 
 ```bash
 sudo cam-shim install
 sudo cp packaging/cam-shim.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now cam-shim
 ```
 
@@ -184,6 +189,8 @@ sudo cam-shim install
 4. **Hide** — per-camera udev rules move physical nodes to `/dev/cam-shim-hidden/` so apps prefer the standardized virtual camera.
 5. **Serve** — supervisor loop watches for plug/unplug and manages shims automatically.
 
+Virtual cameras are created at `/dev/video10+` when possible so low numbers stay available for physical webcams. `clean` / `restore --loopback` only remove cam-shim devices — other apps' virtual cameras (OBS, etc.) are left alone unless you pass `clean --all`.
+
 ## Troubleshooting
 
 ### Quick checks
@@ -214,7 +221,7 @@ sudo systemctl restart cam-shim    # if installed as a service
 Or step by step:
 
 ```bash
-sudo cam-shim restore --loopback   # unhide physical nodes, remove orphan loopbacks
+sudo cam-shim restore --loopback   # remove leftover loopbacks first, then unhide
 sudo cam-shim clean --force        # if loopbacks are still held open
 sudo cam-shim clean --force --reload
 sudo cam-shim serve                # or: sudo systemctl start cam-shim
@@ -228,7 +235,8 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 | Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo modprobe v4l2loopback exclusive_caps=1`; check `cam-shim status` |
 | Only the physical camera shows up | `serve` not running, or camera is compatible | `cam-shim scan`; start `sudo cam-shim serve` |
 | Camera works once, fails on reopen | App left loopback open, or pause/resume bug | Close the app fully; run soak test (below); check logs for `EINVAL` |
-| `clean` does nothing / device busy | Discord, guvcview, or browser holding `/dev/video*` | Close those apps, or `sudo cam-shim clean --force` |
+| Physical camera moved off `/dev/video0` | Another virtual cam claimed a low number while the camera was unplugged | Unplug/replug the camera; cam-shim uses `video10+` so it does not take low numbers. Do not use `clean --all` unless you intend to remove other apps' virtual cams |
+| `clean` skips a device / busy | Not a cam-shim device, or an app holds our virtual cam | Expected for OBS/others; for ours: `sudo cam-shim clean --force` or `--force --reload` |
 | Ghost `/dev/video* (deleted)` nodes | Manual deletion of device nodes | `sudo cam-shim restore`; never delete `/dev/video*` by hand |
 | Physical LED stays on when idle | App still reading the virtual cam | Check `cam-shim status` for active readers; close the app |
 | Camera quarantined after failures | Repeated shim crashes | `cam-shim status` for quarantined serials; fix underlying error, wait 120s, or restart serve |
@@ -257,7 +265,7 @@ The script repeatedly opens and closes the virtual camera to exercise pause/resu
 
 ## Project status
 
-**POC / early stage (v0.1).** `scan`, `fix`, and `serve` work with v4l2loopback and root on tested setups, but compatibility varies by camera, kernel, and desktop apps. `serve` + systemd is the intended always-on workflow once you have validated your hardware. There is no stability guarantee yet.
+**POC / early stage (v0.2).** `scan`, `fix`, and `serve` work with v4l2loopback and root on tested setups, but compatibility varies by camera, kernel, and desktop apps. Prefer running `sudo cam-shim serve` manually for now; the systemd unit is installed but not enabled by default until the daemon is more battle-tested. There is no stability guarantee yet.
 
 ## License
 
