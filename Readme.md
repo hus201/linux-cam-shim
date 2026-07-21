@@ -2,7 +2,7 @@
 
 Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **Linux Standardized** camera via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
 
-> **Early stage (v0.2)** — Core relay, hotplug, scan/status UX, stable loopback indices, and paced output are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
+> **Early stage (v0.3)** — Core relay, hotplug, scan/status UX, stable loopback indices, paced output, and YUYV/uncompressed capture are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
 
 ## Naming
 
@@ -282,7 +282,15 @@ The script repeatedly opens and closes the virtual camera to catch EINVAL or wor
 
 ## Project status
 
-**Early stage (v0.2)** — working toward a reliable “plug in → run serve → pick Linux Standardized” flow. Not ready to call stable yet; run the soak test on your hardware before trusting it daily.
+**Early stage (v0.3)** — working toward a reliable “plug in → run serve → pick Linux Standardized” flow. Not ready to call stable yet; run the soak test on your hardware before trusting it daily.
+
+### v0.3 highlights
+
+- Scan/status UX — physical vs virtual pairing, `recommended_devices`
+- Stable loopback index — `/var/lib/cam-shim/devices.json` (survives reboot)
+- Paced output + loopback fps metadata aligned to `target_fps`
+- Netlink hotplug with 2s settle retry
+- YUYV / NV12 / uncompressed relay when MJPEG is unavailable
 
 | Area | Status |
 |------|--------|
