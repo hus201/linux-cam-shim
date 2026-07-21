@@ -1,13 +1,20 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-pub const DEVICES_FILE: &str = "/run/cam-shim/devices.json";
-const STATE_DIR: &str = "/run/cam-shim";
+/// Persistent loopback index assignments (survives reboot).
+pub const PERSISTENT_DEVICES_FILE: &str = "/var/lib/cam-shim/devices.json";
+/// Legacy runtime path — read for migration, no longer written.
+pub const RUNTIME_DEVICES_FILE: &str = "/run/cam-shim/devices.json";
+/// Primary registry path (persistent).
+pub const DEVICES_FILE: &str = PERSISTENT_DEVICES_FILE;
+
+const PERSISTENT_STATE_DIR: &str = "/var/lib/cam-shim";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceRegistry {
@@ -22,31 +29,20 @@ pub struct LoopbackAssignment {
 }
 
 pub fn read_device_registry() -> Result<DeviceRegistry> {
-    let raw = match fs::read_to_string(DEVICES_FILE) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DeviceRegistry::default());
-        }
-        Err(err) => return Err(err.into()),
-    };
+    let persistent = read_registry_file(PERSISTENT_DEVICES_FILE)?.unwrap_or_default();
+    let runtime = read_registry_file(RUNTIME_DEVICES_FILE)?.unwrap_or_default();
+    let merged = merge_registries(persistent, &runtime);
 
-    serde_json::from_str(&raw).map_err(|err| {
-        crate::error::CamShimError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to parse {DEVICES_FILE}: {err}"),
-        ))
-    })
+    if Path::new(RUNTIME_DEVICES_FILE).exists() {
+        migrate_runtime_registry(&merged)?;
+    }
+
+    Ok(merged)
 }
 
 pub fn write_device_registry(registry: &DeviceRegistry) -> Result<()> {
-    fs::create_dir_all(STATE_DIR)?;
-    let body = serde_json::to_string_pretty(registry).map_err(|err| {
-        crate::error::CamShimError::Io(std::io::Error::other(format!(
-            "failed to serialize device registry: {err}"
-        )))
-    })?;
-    fs::write(DEVICES_FILE, body)?;
-    Ok(())
+    fs::create_dir_all(PERSISTENT_STATE_DIR)?;
+    write_registry_file(PERSISTENT_DEVICES_FILE, registry)
 }
 
 pub fn lookup_loopback_index(camera_key: &str) -> Option<u32> {
@@ -66,6 +62,70 @@ pub fn assign_loopback_index(camera_key: &str, loopback_index: u32, label: &str)
         },
     );
     write_device_registry(&registry)
+}
+
+fn read_registry_file(path: &str) -> Result<Option<DeviceRegistry>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|err| {
+            crate::error::CamShimError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {path}: {err}"),
+            ))
+        })
+}
+
+fn write_registry_file(path: &str, registry: &DeviceRegistry) -> Result<()> {
+    if let Some(dir) = Path::new(path).parent() {
+        fs::create_dir_all(dir)?;
+    }
+
+    let body = serde_json::to_string_pretty(registry).map_err(|err| {
+        crate::error::CamShimError::Io(std::io::Error::other(format!(
+            "failed to serialize device registry: {err}"
+        )))
+    })?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+fn merge_registries(
+    mut primary: DeviceRegistry,
+    secondary: &DeviceRegistry,
+) -> DeviceRegistry {
+    for (key, assignment) in &secondary.assignments {
+        primary
+            .assignments
+            .entry(key.clone())
+            .or_insert_with(|| assignment.clone());
+    }
+    primary.updated_at_ms = primary.updated_at_ms.max(secondary.updated_at_ms);
+    primary
+}
+
+fn migrate_runtime_registry(merged: &DeviceRegistry) -> Result<()> {
+    if fs::metadata(RUNTIME_DEVICES_FILE).is_err() {
+        return Ok(());
+    }
+
+    let persistent_only = read_registry_file(PERSISTENT_DEVICES_FILE)?.unwrap_or_default();
+    if merged.assignments != persistent_only.assignments {
+        write_device_registry(merged)?;
+        tracing::info!(
+            path = PERSISTENT_DEVICES_FILE,
+            assignments = merged.assignments.len(),
+            "migrated loopback index registry from /run to /var/lib"
+        );
+    }
+
+    let _ = fs::remove_file(RUNTIME_DEVICES_FILE);
+    Ok(())
 }
 
 fn unix_now_ms() -> u64 {
@@ -97,8 +157,40 @@ mod tests {
     }
 
     #[test]
-    fn lookup_missing_key_returns_none() {
-        let registry = DeviceRegistry::default();
-        assert!(registry.assignments.get("missing").is_none());
+    fn merge_prefers_persistent_assignments() {
+        let persistent = DeviceRegistry {
+            updated_at_ms: 2,
+            assignments: HashMap::from([(
+                "serial:A".into(),
+                LoopbackAssignment {
+                    loopback_index: 10,
+                    label: "A".into(),
+                },
+            )]),
+        };
+        let runtime = DeviceRegistry {
+            updated_at_ms: 1,
+            assignments: HashMap::from([
+                (
+                    "serial:A".into(),
+                    LoopbackAssignment {
+                        loopback_index: 11,
+                        label: "A-old".into(),
+                    },
+                ),
+                (
+                    "serial:B".into(),
+                    LoopbackAssignment {
+                        loopback_index: 12,
+                        label: "B".into(),
+                    },
+                ),
+            ]),
+        };
+
+        let merged = merge_registries(persistent, &runtime);
+        assert_eq!(merged.assignments["serial:A"].loopback_index, 10);
+        assert_eq!(merged.assignments["serial:B"].loopback_index, 12);
+        assert_eq!(merged.updated_at_ms, 2);
     }
 }

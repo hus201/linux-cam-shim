@@ -2,7 +2,7 @@
 
 Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **Linux Standardized** camera via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
 
-> **Proof of concept (POC)** — Experimental software, not a supported product. Behavior, CLI flags, and packaging may change without notice. `serve` and `fix` require **root** and load kernel modules. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
+> **Early stage (v0.2)** — Core relay, hotplug, scan/status UX, stable loopback indices, and paced output are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
 
 ## Naming
 
@@ -59,10 +59,25 @@ Requires `cargo-deb` (the build script installs it automatically if missing).
 
 ### Scan cameras (no root)
 
+Lists physical and virtual cameras with roles and pairing hints:
+
 ```bash
 cam-shim scan
 cam-shim scan --json
 ```
+
+Example human output:
+
+```text
+/dev/video0  Fantech C30  [physical, needs shim]
+  paired with: /dev/video10
+  expected virtual name: Fantech C30 - Linux Standardized
+
+/dev/video10  Fantech C30 - Linux Std  [virtual, use this]
+  paired with: /dev/video0
+```
+
+When `serve` is running, JSON includes `recommended_devices` — pick those in your app, **not** the physical device.
 
 ### Run continuously (recommended)
 
@@ -78,14 +93,17 @@ sudo cam-shim serve --max-width 1280 --max-height 720   # cap UVC negotiation
 The supervisor includes:
 
 - **Netlink hotplug** — reacts within ~200ms when cameras are plugged or unplugged
+- **Hotplug settle** — retries discovery for up to 2s after plug-in while sysfs/V4L2 comes up
 - **Fallback poll** — safety reconcile every 5s by default if an event is missed (`--poll-secs` to tune)
 - **Always capture** — physical camera stays open while a shim worker is running
+- **Paced output** — steady `target_fps` to the virtual device (dup/drop as needed)
+- **Stable loopback index** — same USB camera keeps the same `/dev/video10+` across replug and reboot (`/var/lib/cam-shim/devices.json`)
 - **Startup self-check** — repair ghost nodes and remove orphan loopbacks
 - **Worker health** — restarts shims that stop producing frames
 - **Exponential backoff** — avoids crash/restart storms after failures
 - **Circuit breaker** — quarantines a camera after 5 failures (120s default)
 - **Watchdog** — logs if the reconcile loop stalls
-- **State file** — `/run/cam-shim/state.json` for observability
+- **State file** — `/run/cam-shim/state.json` for observability (runtime only)
 
 Tuning flags: `--no-hotplug`, `--max-failures`, `--quarantine-secs`, `--backoff-ms`, `--stale-frame-secs`, `--watchdog-secs`, `--no-state-file`, `--max-width`, `--max-height`
 
@@ -127,7 +145,7 @@ cam-shim status
 cam-shim status --json
 ```
 
-Shows whether `serve` is running, managed cameras, loopback paths, heartbeats, and quarantined serials. No root required.
+Shows whether `serve` is running, managed cameras, loopback paths, heartbeats, quarantined serials, and a unified camera list with pairing. No root required.
 
 ### Diagnose and repair
 
@@ -179,21 +197,21 @@ sudo cam-shim install
 
 ## How it works
 
-1. **Scan** — enumerate V4L2 devices via sysfs, query formats and frame intervals.
+1. **Scan** — enumerate physical and virtual V4L2 devices; flag compat issues; pair physical cameras with their standardized loopback.
 2. **Compat check** — flag devices missing 30/60 fps or reporting variable frame rate.
-3. **Shim** — capture MJPEG from the physical device, duplicate/drop frames to target fps, write to v4l2loopback.
-4. **Serve** — supervisor loop polls for plug/unplug and manages shims automatically.
+3. **Shim** — capture MJPEG from the physical device at native rate; pace output at `target_fps` (dup/drop); write to v4l2loopback with matching fps metadata.
+4. **Serve** — supervisor reacts to hotplug (with settle retry) and manages shims automatically.
 
 Both the physical camera and the virtual **Linux Standardized** device stay visible. Pick the standardized one in your app.
 
-Virtual cameras are created at `/dev/video10+` when possible so low numbers stay available for physical webcams. `clean` / `restore --loopback` only remove cam-shim devices — other apps' virtual cameras (OBS, etc.) are left alone unless you pass `clean --all`.
+Virtual cameras are created at `/dev/video10+` when possible so low numbers stay available for physical webcams. The same camera gets the same loopback index every time via `/var/lib/cam-shim/devices.json`. `clean` / `restore --loopback` only remove cam-shim devices — other apps' virtual cameras (OBS, etc.) are left alone unless you pass `clean --all`.
 
 ## Troubleshooting
 
 ### Quick checks
 
 ```bash
-cam-shim scan                     # list visible cameras and compat status
+cam-shim scan                     # cameras, roles, recommended virtual device
 cam-shim status                   # serve, loopbacks, heartbeats, quarantined serials
 sudo cam-shim doctor --check-only # full system report without changes
 journalctl -u cam-shim -f         # if running via systemd
@@ -231,7 +249,9 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 | `scan` finds no cameras | Ghost nodes or unplugged camera | `sudo cam-shim restore` |
 | Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo modprobe v4l2loopback exclusive_caps=1`; check `cam-shim status` |
 | Only the physical camera shows up | `serve` not running, or camera is compatible | `cam-shim scan`; start `sudo cam-shim serve` |
+| Plug-in not detected for ~2s | Hotplug settle or slow sysfs | Normal — settle retries up to 2s; fallback poll every 5s |
 | Camera works once, fails on reopen | App left loopback open | Close the app fully; run soak test (below); check logs for `EINVAL` |
+| Virtual cam moved to a new `/dev/videoN` | Registry lost or first sighting | Should stabilize after first shim; check `/var/lib/cam-shim/devices.json` |
 | Physical camera moved off `/dev/video0` | Another virtual cam claimed a low number while the camera was unplugged | Unplug/replug the camera; cam-shim uses `video10+` so it does not take low numbers. Do not use `clean --all` unless you intend to remove other apps' virtual cams |
 | `clean` skips a device / busy | Not a cam-shim device, or an app holds our virtual cam | Expected for OBS/others; for ours: `sudo cam-shim clean --force` or `--force --reload` |
 | Ghost `/dev/video* (deleted)` nodes | Manual deletion of device nodes | `sudo cam-shim restore`; never delete `/dev/video*` by hand |
@@ -262,7 +282,22 @@ The script repeatedly opens and closes the virtual camera to catch EINVAL or wor
 
 ## Project status
 
-**POC / early stage (v0.2).** `scan`, `fix`, and `serve` work with v4l2loopback and root on tested setups, but compatibility varies by camera, kernel, and desktop apps. Prefer running `sudo cam-shim serve` manually for now; the systemd unit is installed but not enabled by default until the daemon is more battle-tested. There is no stability guarantee yet.
+**Early stage (v0.2)** — working toward a reliable “plug in → run serve → pick Linux Standardized” flow. Not ready to call stable yet; run the soak test on your hardware before trusting it daily.
+
+| Area | Status |
+|------|--------|
+| UVC scan + compat detection | Done |
+| MJPEG shim + paced `target_fps` output | Done |
+| Netlink hotplug + settle retry + fallback poll | Done |
+| Scan/status UX (physical vs virtual, recommendations) | Done |
+| Stable loopback index (`/var/lib/cam-shim/devices.json`) | Done |
+| Always-on capture (no idle pause) | Done |
+| YUYV / raw capture path | Not yet |
+| PipeWire / Flatpak portal polish | Not yet |
+| Rootless operation | Not yet |
+| Soak test in CI | Manual (`scripts/soak.sh`) |
+
+The systemd unit ships with the `.deb` but stays **disabled by default** until you validate your camera with `sudo cam-shim serve`.
 
 ## License
 

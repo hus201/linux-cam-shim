@@ -24,6 +24,8 @@ use crate::probe::{scan_devices_with_options, ProbeDepth};
 use crate::shim::{run_shim_until, ShimConfig};
 
 const DEFAULT_POLL_SECS: u64 = 5;
+const HOTPLUG_SETTLE_STEP: Duration = Duration::from_millis(200);
+const HOTPLUG_SETTLE_MAX: Duration = Duration::from_millis(2000);
 const DEFAULT_MAX_FAILURES: u32 = 5;
 const DEFAULT_QUARANTINE_SECS: u64 = 120;
 const DEFAULT_BACKOFF_BASE_MS: u64 = 1_000;
@@ -212,14 +214,20 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 
     let mut hotplug_active = hotplug_handle.is_some();
 
-    supervisor.reconcile(&config)?;
+    supervisor.reconcile(&config, false)?;
     last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
 
     while !shutdown.load(Ordering::SeqCst) {
-        if hotplug_active {
+        let after_hotplug = if hotplug_active {
             match hotplug_rx.recv_timeout(config.poll_interval) {
-                Ok(()) => tracing::debug!("reconciling after netlink hotplug event"),
-                Err(RecvTimeoutError::Timeout) => tracing::trace!("reconciling on fallback poll"),
+                Ok(()) => {
+                    tracing::debug!("reconciling after netlink hotplug event");
+                    true
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    tracing::trace!("reconciling on fallback poll");
+                    false
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     tracing::warn!("hotplug monitor stopped — continuing with fallback polling");
                     hotplug_active = false;
@@ -228,13 +236,14 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
             }
         } else {
             thread::sleep(config.poll_interval);
-        }
+            false
+        };
 
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
-        supervisor.reconcile(&config)?;
+        supervisor.reconcile(&config, after_hotplug)?;
         last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
     }
 
@@ -252,7 +261,7 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 }
 
 impl Supervisor {
-    fn reconcile(&mut self, config: &ServeConfig) -> Result<()> {
+    fn reconcile(&mut self, config: &ServeConfig, after_hotplug: bool) -> Result<()> {
         self.last_reconcile = Instant::now();
         let now = Instant::now();
 
@@ -260,7 +269,7 @@ impl Supervisor {
         self.reap_stale_workers(config, now);
 
         let skip_paths = cam_shim_held_device_paths(&build_video_device_holder_map());
-        let candidates = discover_candidates(&skip_paths)?;
+        let candidates = discover_candidates_with_settle(&skip_paths, after_hotplug)?;
         let active_serials: std::collections::HashSet<_> =
             candidates.iter().map(|c| c.serial.clone()).collect();
 
@@ -473,6 +482,42 @@ fn write_state_snapshot(supervisor: &Supervisor, now: Instant) -> Result<()> {
     })?;
     fs::write(STATE_FILE, json)?;
     Ok(())
+}
+
+fn discover_candidates_with_settle(
+    skip_paths: &HashSet<String>,
+    after_hotplug: bool,
+) -> Result<Vec<ShimCandidate>> {
+    if !after_hotplug {
+        return discover_candidates(skip_paths);
+    }
+
+    let deadline = Instant::now() + HOTPLUG_SETTLE_MAX;
+    let mut previous_serials: Option<HashSet<String>> = None;
+
+    loop {
+        let candidates = discover_candidates(skip_paths)?;
+        let serials: HashSet<_> = candidates.iter().map(|c| c.serial.clone()).collect();
+
+        if previous_serials.as_ref() == Some(&serials) {
+            if !candidates.is_empty() {
+                tracing::debug!(
+                    count = candidates.len(),
+                    "hotplug settle complete — camera list stable"
+                );
+            }
+            return Ok(candidates);
+        }
+
+        previous_serials = Some(serials);
+
+        if Instant::now() >= deadline {
+            tracing::debug!("hotplug settle timed out — proceeding with current camera list");
+            return Ok(candidates);
+        }
+
+        thread::sleep(HOTPLUG_SETTLE_STEP);
+    }
 }
 
 fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate>> {

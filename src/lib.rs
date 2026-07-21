@@ -30,7 +30,7 @@ pub use devices::{
 };
 pub use device_registry::{
     assign_loopback_index, lookup_loopback_index, read_device_registry, DeviceRegistry,
-    LoopbackAssignment, DEVICES_FILE,
+    LoopbackAssignment, DEVICES_FILE, PERSISTENT_DEVICES_FILE, RUNTIME_DEVICES_FILE,
 };
 pub use doctor::{print_doctor_report, run_doctor, DoctorConfig, DoctorReport};
 pub use error::{CamShimError, Result};
