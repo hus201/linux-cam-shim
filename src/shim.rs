@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use v4l::buffer::Type;
 use v4l::format::FourCC;
@@ -21,6 +21,45 @@ use crate::loopback_output::{LoopbackOutput, OUTPUT_BUFFERS};
 
 const ENODEV: i32 = 19;
 const CAPTURE_BUFFERS: u32 = 2;
+const CAPTURE_DRAIN_TIMEOUT: Duration = Duration::from_millis(2);
+
+/// Steady wall-clock pacing for loopback output (avoids bursty dup/drop).
+struct FramePacer {
+    frame_period: Duration,
+    next_tick: Instant,
+}
+
+impl FramePacer {
+    fn new(fps: u32) -> Self {
+        let fps = fps.max(1);
+        Self {
+            frame_period: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+            next_tick: Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    fn frame_period(&self) -> Duration {
+        self.frame_period
+    }
+
+    /// Wait until the next output tick. Uses wall-clock scheduling so a slow
+    /// capture loop does not burst multiple frames to catch up.
+    fn wait_for_tick(&mut self, running: &AtomicBool) -> bool {
+        while running.load(Ordering::SeqCst) {
+            let now = Instant::now();
+            if now >= self.next_tick {
+                self.next_tick = now + self.frame_period;
+                return true;
+            }
+
+            let remaining = self.next_tick - now;
+            thread::sleep(remaining.min(Duration::from_millis(2)));
+        }
+
+        false
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CaptureLimits {
@@ -74,8 +113,10 @@ pub fn run_shim_until(
     // producer attaches via STREAMON + mmap output. Raw write() does not count.
     let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
     let mut cap_stream = Stream::with_buffers(&source, Type::VideoCapture, CAPTURE_BUFFERS)?;
+    cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
     let (buffer, meta) = CaptureStream::next(&mut cap_stream).map_err(CamShimError::Io)?;
     let frame = capture_frame_slice(buffer, meta)?;
+    let mut latest_frame = frame.to_vec();
     loopback_out.prime(frame)?;
 
     if let Some(hb) = heartbeat.as_ref() {
@@ -91,6 +132,7 @@ pub fn run_shim_until(
         height = loopback_format.height,
         requested_fps = config.target_fps,
         loopback_fps,
+        output_fps = config.target_fps,
         max_capture_width = config.max_capture_width,
         max_capture_height = config.max_capture_height,
         "shim running"
@@ -102,6 +144,7 @@ pub fn run_shim_until(
             &loopback_format,
             &mut cap_stream,
             &mut loopback_out,
+            &mut latest_frame,
             &running,
             heartbeat.as_ref(),
         ) {
@@ -120,16 +163,46 @@ fn run_capture_session(
     loopback_format: &v4l::format::Format,
     cap_stream: &mut Stream<'_>,
     loopback_out: &mut LoopbackOutput<'_>,
+    latest_frame: &mut Vec<u8>,
     running: &Arc<AtomicBool>,
     heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
-    while running.load(Ordering::SeqCst) {
-        let (buffer, meta) = CaptureStream::next(cap_stream).map_err(CamShimError::Io)?;
-        let frame = capture_frame_slice(buffer, meta)?;
-        submit_loopback_frame(loopback_out, frame, &config.target_path, loopback_format)?;
+    let mut pacer = FramePacer::new(config.target_fps);
+
+    while pacer.wait_for_tick(running) {
+        drain_capture_frames(cap_stream, latest_frame)?;
+        submit_loopback_frame(
+            loopback_out,
+            latest_frame,
+            &config.target_path,
+            loopback_format,
+        )?;
         if let Some(hb) = heartbeat {
             touch_heartbeat(hb);
         }
+    }
+
+    Ok(())
+}
+
+/// Read every frame currently queued on the capture device, keeping the newest.
+fn drain_capture_frames(cap_stream: &mut Stream<'_>, latest_frame: &mut Vec<u8>) -> Result<()> {
+    loop {
+        match CaptureStream::next(cap_stream) {
+            Ok((buffer, meta)) => {
+                let frame = capture_frame_slice(buffer, meta)?;
+                latest_frame.clear();
+                latest_frame.extend_from_slice(frame);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(err) => return Err(CamShimError::Io(err)),
+        }
+    }
+
+    if latest_frame.is_empty() {
+        return Err(CamShimError::Io(std::io::Error::other(
+            "no capture frame available for paced output",
+        )));
     }
 
     Ok(())
@@ -517,5 +590,17 @@ mod tests {
         resolutions.retain(|(w, h)| resolution_within_cap(*w, *h, limits));
         resolutions.sort_by_key(|b| std::cmp::Reverse(b.0 * b.1));
         assert_eq!(resolutions[0], (1920, 1080));
+    }
+
+    #[test]
+    fn frame_pacer_period_for_30fps() {
+        let pacer = FramePacer::new(30);
+        assert_eq!(pacer.frame_period(), Duration::from_nanos(33_333_333));
+    }
+
+    #[test]
+    fn frame_pacer_period_clamps_zero_fps() {
+        let pacer = FramePacer::new(0);
+        assert_eq!(pacer.frame_period(), Duration::from_nanos(1_000_000_000));
     }
 }
