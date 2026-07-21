@@ -61,20 +61,20 @@ impl<'a> LoopbackOutput<'a> {
         self.state
     }
 
-    /// Queue the first frame so capture-side clients can discover the device.
+    /// Fill the first OUTPUT mmap buffer and start streaming.
     ///
-    /// One OUTPUT QBUF after STREAMON — a second `next()` would OUTPUT-DQBUF and
-    /// can block indefinitely on v4l2loopback when nothing is reading yet.
+    /// Does not QBUF here — `OutputStream::next()` on the first `submit()` queues
+    /// this filled buffer. An extra manual QBUF would leave buffer 0 in-flight and
+    /// make every subsequent `next()` re-queue it (EINVAL) → frozen capture.
     pub fn prime(&mut self, frame: &[u8]) -> Result<()> {
         self.require_state(LoopbackOutputState::Unprimed, "prime")?;
         validate_frame(frame)?;
 
         let (buf, meta) = OutputStream::next(&mut self.stream).map_err(CamShimError::Io)?;
         write_frame_into_buffer(buf, meta, frame).map_err(CamShimError::Io)?;
-        OutputStream::queue(&mut self.stream, 0).map_err(CamShimError::Io)?;
 
         self.state = LoopbackOutputState::Ready;
-        tracing::debug!(state = ?self.state, "loopback primed for capture-side discovery");
+        tracing::debug!(state = ?self.state, "loopback primed (first frame queued on submit)");
         Ok(())
     }
 
@@ -92,7 +92,7 @@ impl<'a> LoopbackOutput<'a> {
                 Ok(())
             }
             Err(err) if Self::is_backpressure(&err) => {
-                tracing::trace!(%err, "loopback mmap submit skipped (backpressure)");
+                tracing::debug!(%err, "loopback mmap submit skipped (backpressure)");
                 Ok(())
             }
             Err(err) => Err(err),
