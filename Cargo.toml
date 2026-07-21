@@ -29,7 +29,6 @@ when incompatible cameras are plugged in."""
 assets = [
     ["target/release/cam-shim", "usr/bin/", "755"],
     ["packaging/cam-shim.service", "usr/lib/systemd/system/cam-shim.service", "644"],
-    ["packaging/modprobe.d/cam-shim-v4l2loopback.conf", "etc/modprobe.d/cam-shim-v4l2loopback.conf", "644"],
     ["Readme.md", "usr/share/doc/cam-shim/README", "644"],
     ["LICENSE", "usr/share/doc/cam-shim/copyright", "644"],
 ]

@@ -247,7 +247,7 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 | Symptom | Likely cause | What to do |
 |--------|----------------|------------|
 | `scan` finds no cameras | Ghost nodes or unplugged camera | `sudo cam-shim restore` |
-| Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo modprobe v4l2loopback exclusive_caps=1`; check `cam-shim status` |
+| Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo cam-shim install` or start `serve`; check `cam-shim status` |
 | Only the physical camera shows up | `serve` not running, or camera is compatible | `cam-shim scan`; start `sudo cam-shim serve` |
 | Plug-in not detected for ~2s | Hotplug settle or slow sysfs | Normal — settle retries up to 2s; fallback poll every 5s |
 | Camera works once, fails on reopen | App left loopback open | Close the app fully; run soak test (below); check logs for `EINVAL` |

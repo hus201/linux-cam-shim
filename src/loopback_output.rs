@@ -9,10 +9,14 @@
 //!                                              │
 //!                                              └── submit() ──► Streaming
 //! ```
+//!
+//! Bootstrap uses mmap (STREAMON + QBUF). Steady streaming uses `write(2)` on a
+//! second handle so we do not depend on OUTPUT DQBUF while buffers are full.
 
-use std::io;
+use std::io::{self, Write};
 use std::time::Duration;
 
+use libc;
 use v4l::buffer::Type;
 use v4l::io::mmap::Stream;
 use v4l::io::traits::OutputStream;
@@ -21,7 +25,7 @@ use v4l::prelude::Device;
 use crate::error::{CamShimError, Result};
 
 pub const OUTPUT_BUFFERS: u32 = 2;
-const OUTPUT_QUEUE_TIMEOUT: Duration = Duration::from_millis(500);
+const OUTPUT_MMAP_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackOutputState {
@@ -42,16 +46,22 @@ enum OutputEvent {
 
 pub struct LoopbackOutput<'a> {
     stream: Stream<'a>,
+    write_dev: Device,
     state: LoopbackOutputState,
 }
 
 impl<'a> LoopbackOutput<'a> {
-    pub fn open(target: &'a mut Device, buffer_count: u32) -> Result<Self> {
+    pub fn open(target: &'a mut Device, device_path: &str, buffer_count: u32) -> Result<Self> {
+        let write_dev = Device::with_path(device_path)
+            .map_err(|_| CamShimError::DeviceNotFound(device_path.to_string()))?;
+
         let mut stream = Stream::with_buffers(target, Type::VideoOutput, buffer_count)
             .map_err(CamShimError::Io)?;
-        stream.set_timeout(OUTPUT_QUEUE_TIMEOUT);
+        stream.set_timeout(OUTPUT_MMAP_TIMEOUT);
+
         Ok(Self {
             stream,
+            write_dev,
             state: LoopbackOutputState::Unprimed,
         })
     }
@@ -74,10 +84,6 @@ impl<'a> LoopbackOutput<'a> {
     }
 
     /// Push one frame while streaming.
-    ///
-    /// Uses `write(2)` rather than mmap QBUF/DQBUF. v4l2loopback mmap output
-    /// cannot dequeue a third buffer until a capture client consumes one; with
-    /// only two buffers that yields EINVAL when nothing is reading yet.
     pub fn submit(&mut self, frame: &[u8]) -> Result<()> {
         self.require_state_any(
             &[LoopbackOutputState::Ready, LoopbackOutputState::Streaming],
@@ -85,17 +91,57 @@ impl<'a> LoopbackOutput<'a> {
         )?;
         validate_frame(frame)?;
 
-        write_frame_to_device(self.stream.handle().fd(), frame)?;
-        self.state = LoopbackOutputState::Streaming;
-        Ok(())
+        match self.write_dev.write_all(frame) {
+            Ok(()) => {
+                self.state = LoopbackOutputState::Streaming;
+                Ok(())
+            }
+            Err(err) if is_write_backpressure(&err) => {
+                tracing::trace!(%err, "loopback write skipped (backpressure)");
+                Ok(())
+            }
+            Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                tracing::debug!(%err, "loopback write busy — falling back to mmap output");
+                self.submit_via_mmap(frame)
+            }
+            Err(err) => Err(CamShimError::Io(err)),
+        }
+    }
+
+    fn submit_via_mmap(&mut self, frame: &[u8]) -> Result<()> {
+        match self.queue_filled_buffer(frame) {
+            Ok(()) => {
+                self.state = LoopbackOutputState::Streaming;
+                Ok(())
+            }
+            Err(err) if Self::is_mmap_backpressure(&err) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     fn queue_filled_buffer(&mut self, frame: &[u8]) -> Result<()> {
         queue_filled_buffer(&mut self.stream, frame)
     }
 
+    pub fn is_backpressure(err: &CamShimError) -> bool {
+        match err {
+            CamShimError::Io(io_err) => {
+                is_write_backpressure(io_err) || is_mmap_backpressure(io_err)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_mmap_backpressure(err: &CamShimError) -> bool {
+        match err {
+            CamShimError::Io(io_err) => is_mmap_backpressure(io_err),
+            _ => false,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn is_queue_timeout(err: &CamShimError) -> bool {
-        matches!(err, CamShimError::Io(io_err) if io_err.kind() == io::ErrorKind::TimedOut)
+        Self::is_mmap_backpressure(err)
     }
 
     fn require_state(&self, expected: LoopbackOutputState, action: &str) -> Result<()> {
@@ -113,22 +159,20 @@ impl<'a> LoopbackOutput<'a> {
     }
 }
 
-fn write_frame_to_device(fd: std::os::raw::c_int, frame: &[u8]) -> Result<()> {
-    let mut written = 0usize;
-    while written < frame.len() {
-        let ret = unsafe {
-            libc::write(
-                fd,
-                frame[written..].as_ptr().cast(),
-                frame.len() - written,
-            )
-        };
-        if ret < 0 {
-            return Err(CamShimError::Io(std::io::Error::last_os_error()));
-        }
-        written += ret as usize;
+fn is_write_backpressure(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::WouldBlock
+        || matches!(err.raw_os_error(), Some(libc::EAGAIN))
+}
+
+fn is_mmap_backpressure(err: &io::Error) -> bool {
+    if err.kind() == io::ErrorKind::TimedOut {
+        return true;
     }
-    Ok(())
+
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EAGAIN) | Some(libc::EBUSY) | Some(libc::EINVAL)
+    )
 }
 
 fn queue_filled_buffer(stream: &mut Stream<'_>, frame: &[u8]) -> Result<()> {
@@ -227,5 +271,19 @@ mod tests {
         let mut buf = [0u8; 8];
         let mut meta = v4l::buffer::Metadata::default();
         assert!(write_frame_into_buffer(&mut buf, &mut meta, &[0; 16]).is_err());
+    }
+
+    #[test]
+    fn detects_write_backpressure() {
+        assert!(is_write_backpressure(&io::Error::from(io::ErrorKind::WouldBlock)));
+        assert!(is_write_backpressure(&io::Error::from_raw_os_error(libc::EAGAIN)));
+        assert!(!is_write_backpressure(&io::Error::from_raw_os_error(libc::EBUSY)));
+    }
+
+    #[test]
+    fn detects_mmap_backpressure() {
+        assert!(is_mmap_backpressure(&io::Error::from(io::ErrorKind::TimedOut)));
+        assert!(is_mmap_backpressure(&io::Error::from_raw_os_error(libc::EINVAL)));
+        assert!(!is_mmap_backpressure(&io::Error::from_raw_os_error(libc::ENODEV)));
     }
 }

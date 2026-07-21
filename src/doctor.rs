@@ -248,7 +248,7 @@ fn build_recommendations(snapshot: &RuntimeSnapshot, issues: &[String]) -> Vec<S
         out.push("Run: sudo cam-shim restore (repairs ghost nodes)".into());
     }
     if !snapshot.loopback_module_loaded {
-        out.push("Run: sudo modprobe v4l2loopback exclusive_caps=1".into());
+        out.push("Run: sudo cam-shim install  (loads v4l2loopback with exclusive_caps=1)".into());
     }
     if snapshot.needs_shim_devices > 0 && !snapshot.serve_running {
         out.push("Run: sudo cam-shim serve (or sudo systemctl start cam-shim)".into());

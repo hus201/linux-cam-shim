@@ -77,14 +77,19 @@ pub struct HolderRelease {
     pub signal: String,
 }
 
+const V4L2LOOPBACK_MODULE: &str = "v4l2loopback";
+/// Module options passed on every `modprobe` — no /etc/modprobe.d drop-in required.
+const V4L2LOOPBACK_LOAD_ARGS: &[&str] = &["exclusive_caps=1", "devices=0"];
+
 pub fn ensure_module_loaded() -> Result<()> {
     if fs::metadata("/sys/module/v4l2loopback").is_ok() {
         return Ok(());
     }
 
-    let status = Command::new("modprobe")
-        .args(["v4l2loopback", "exclusive_caps=1"])
-        .status()?;
+    let mut command = Command::new("modprobe");
+    command.arg(V4L2LOOPBACK_MODULE);
+    command.args(V4L2LOOPBACK_LOAD_ARGS);
+    let status = command.status()?;
 
     if !status.success() {
         return Err(CamShimError::Io(io::Error::other(
@@ -347,13 +352,12 @@ fn create_with_ioctl(label: &str, target_fps: u32, output_nr: i32) -> Result<Loo
 
 fn create_with_modprobe(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     let kernel_label = kernel_card_label(label);
+    let card_label = format!("card_label={kernel_label}");
     let status = Command::new("modprobe")
-        .args([
-            "v4l2loopback",
-            "exclusive_caps=1",
-            &format!("card_label={kernel_label}"),
-            "devices=1",
-        ])
+        .arg(V4L2LOOPBACK_MODULE)
+        .args(V4L2LOOPBACK_LOAD_ARGS)
+        .arg(&card_label)
+        .arg("devices=1")
         .status()?;
 
     if !status.success() {

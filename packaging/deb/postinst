@@ -17,16 +17,9 @@ case "$1" in
         echo "After you have validated your setup, you can opt in with:"
         echo "  sudo systemctl enable --now cam-shim"
         echo ""
-        echo "v4l2loopback is configured via /etc/modprobe.d/cam-shim-v4l2loopback.conf"
-        echo "(exclusive_caps=1). Load the module with:"
-        echo "  sudo modprobe v4l2loopback"
+        echo "cam-shim loads v4l2loopback itself (exclusive_caps=1, devices=0)."
+        echo "No /etc/modprobe.d configuration is required."
         echo ""
-        if [ -d /sys/module/v4l2loopback ]; then
-            echo "Note: v4l2loopback is already loaded. To apply exclusive_caps=1, close"
-            echo "apps using virtual cameras, then run:"
-            echo "  sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback"
-            echo ""
-        fi
         echo "Many recent kernels include v4l2loopback in-tree — you may not need"
         echo "v4l2loopback-dkms. Do not install the Ubuntu DKMS package on kernel 7.x"
         echo "unless you know you need it; it often fails to build."

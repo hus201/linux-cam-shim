@@ -146,7 +146,7 @@ fn run_shim_once(
     let capture_fps = native_capture_fps(&source, &source_format);
     let loopback_format = configure_target(&target, &source_format, config.target_fps)?;
 
-    let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
+    let mut loopback_out = LoopbackOutput::open(&mut target, &config.target_path, OUTPUT_BUFFERS)?;
     let mut cap_stream = open_capture_stream(&source)?;
     let latest_frame = read_first_capture_frame(&mut cap_stream, running, heartbeat)?;
     loopback_out.prime(&latest_frame)?;
@@ -183,10 +183,17 @@ fn run_shim_once(
         ) {
             tracing::warn!(%err, "capture session error — retrying");
             pause_physical_capture(&mut cap_stream);
+            drop(cap_stream);
             thread::sleep(CAPTURE_REOPEN_DELAY);
             if !running.load(Ordering::SeqCst) {
                 break;
             }
+            source = open_source_device(&config.source_path)?;
+            let limits = CaptureLimits {
+                max_width: config.max_capture_width,
+                max_height: config.max_capture_height,
+            };
+            configure_source(&mut source, limits)?;
             cap_stream = open_capture_stream(&source)?;
             if let Ok(frame) = read_first_capture_frame(&mut cap_stream, running, heartbeat) {
                 latest_frame = frame;
@@ -247,21 +254,13 @@ fn run_capture_session(
     let mut pacer = FramePacer::new(config.target_fps);
 
     while pacer.wait_for_tick(running) {
-        if let Err(err) = drain_capture_frames(cap_stream, latest_frame) {
-            return Err(CamShimError::Io(std::io::Error::other(format!(
-                "capture drain failed: {err}"
-            ))));
-        }
-        if let Err(err) = submit_loopback_frame(
+        drain_capture_frames(cap_stream, latest_frame)?;
+        submit_loopback_frame(
             loopback_out,
             latest_frame,
             &config.target_path,
             loopback_format,
-        ) {
-            return Err(CamShimError::Io(std::io::Error::other(format!(
-                "loopback submit failed: {err}"
-            ))));
-        }
+        )?;
         if let Some(hb) = heartbeat {
             touch_heartbeat(hb);
         }
@@ -280,6 +279,10 @@ fn drain_capture_frames(cap_stream: &mut Stream<'_>, latest_frame: &mut Vec<u8>)
                 latest_frame.extend_from_slice(frame);
             }
             Err(err) if is_capture_would_block(&err) => break,
+            Err(err) if is_capture_transient(&err) && !latest_frame.is_empty() => {
+                tracing::debug!(%err, "capture drain skipped (keeping latest frame)");
+                break;
+            }
             Err(err) => return Err(CamShimError::Io(err)),
         }
     }
@@ -301,7 +304,7 @@ fn submit_loopback_frame(
 ) -> Result<()> {
     match loopback_out.submit(frame) {
         Ok(()) => Ok(()),
-        Err(err) if LoopbackOutput::is_queue_timeout(&err) => {
+        Err(err) if LoopbackOutput::is_backpressure(&err) => {
             tracing::debug!(
                 %err,
                 target = target_path,
@@ -317,6 +320,10 @@ fn submit_loopback_frame(
             loopback_format.fourcc
         )))),
     }
+}
+
+fn is_capture_transient(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::EIO))
 }
 
 fn pause_physical_capture(stream: &mut Stream<'_>) {
