@@ -288,7 +288,7 @@ fn create_with_ioctl(label: &str, target_fps: u32, output_nr: i32) -> Result<Loo
         max_width: 8192,
         min_height: 0,
         max_height: 8192,
-        max_buffers: 0,
+        max_buffers: 4,
         max_openers: 0,
         debug: 0,
         announce_all_caps: 0,

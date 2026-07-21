@@ -206,7 +206,10 @@ fn is_capture_device(device_path: &str) -> bool {
 
     Device::with_path(device_path)
         .and_then(|dev| dev.query_caps())
-        .map(|caps| caps.capabilities.contains(CapFlags::VIDEO_CAPTURE))
+        .map(|caps| {
+            let caps = caps.capabilities;
+            caps.contains(CapFlags::VIDEO_CAPTURE) && !caps.contains(CapFlags::META_CAPTURE)
+        })
         .unwrap_or(false)
 }
 

@@ -74,6 +74,10 @@ impl<'a> LoopbackOutput<'a> {
     }
 
     /// Push one frame while streaming.
+    ///
+    /// Uses `write(2)` rather than mmap QBUF/DQBUF. v4l2loopback mmap output
+    /// cannot dequeue a third buffer until a capture client consumes one; with
+    /// only two buffers that yields EINVAL when nothing is reading yet.
     pub fn submit(&mut self, frame: &[u8]) -> Result<()> {
         self.require_state_any(
             &[LoopbackOutputState::Ready, LoopbackOutputState::Streaming],
@@ -81,7 +85,7 @@ impl<'a> LoopbackOutput<'a> {
         )?;
         validate_frame(frame)?;
 
-        self.queue_filled_buffer(frame)?;
+        write_frame_to_device(self.stream.handle().fd(), frame)?;
         self.state = LoopbackOutputState::Streaming;
         Ok(())
     }
@@ -107,6 +111,24 @@ impl<'a> LoopbackOutput<'a> {
         }
         Err(invalid_state(action, self.state, expected))
     }
+}
+
+fn write_frame_to_device(fd: std::os::raw::c_int, frame: &[u8]) -> Result<()> {
+    let mut written = 0usize;
+    while written < frame.len() {
+        let ret = unsafe {
+            libc::write(
+                fd,
+                frame[written..].as_ptr().cast(),
+                frame.len() - written,
+            )
+        };
+        if ret < 0 {
+            return Err(CamShimError::Io(std::io::Error::last_os_error()));
+        }
+        written += ret as usize;
+    }
+    Ok(())
 }
 
 fn queue_filled_buffer(stream: &mut Stream<'_>, frame: &[u8]) -> Result<()> {

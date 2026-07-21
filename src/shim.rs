@@ -247,13 +247,21 @@ fn run_capture_session(
     let mut pacer = FramePacer::new(config.target_fps);
 
     while pacer.wait_for_tick(running) {
-        drain_capture_frames(cap_stream, latest_frame)?;
-        submit_loopback_frame(
+        if let Err(err) = drain_capture_frames(cap_stream, latest_frame) {
+            return Err(CamShimError::Io(std::io::Error::other(format!(
+                "capture drain failed: {err}"
+            ))));
+        }
+        if let Err(err) = submit_loopback_frame(
             loopback_out,
             latest_frame,
             &config.target_path,
             loopback_format,
-        )?;
+        ) {
+            return Err(CamShimError::Io(std::io::Error::other(format!(
+                "loopback submit failed: {err}"
+            ))));
+        }
         if let Some(hb) = heartbeat {
             touch_heartbeat(hb);
         }
@@ -612,9 +620,23 @@ fn configure_target(
     format.width = source_format.width;
     format.height = source_format.height;
     format.fourcc = source_format.fourcc;
+    if source_format.size > 0 {
+        format.size = source_format.size;
+    }
 
     let format = Output::set_format(target, &format)
         .map_err(|err| format_error("loopback", &format, err))?;
+
+    if source_format.size > format.size {
+        tracing::warn!(
+            source_sizeimage = source_format.size,
+            loopback_sizeimage = format.size,
+            width = format.width,
+            height = format.height,
+            fourcc = %format.fourcc,
+            "loopback sizeimage smaller than source — frames may be truncated"
+        );
+    }
 
     let params = OutputParameters::with_fps(loopback_fps);
     Output::set_params(target, &params).map_err(|err| {
