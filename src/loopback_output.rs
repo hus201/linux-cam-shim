@@ -9,14 +9,10 @@
 //!                                              │
 //!                                              └── submit() ──► Streaming
 //! ```
-//!
-//! All frames go through mmap OUTPUT QBUF. A second `write(2)` fd does not update
-//! what capture clients see once mmap STREAMON is active.
 
 use std::io;
 use std::time::Duration;
 
-use libc;
 use v4l::buffer::Type;
 use v4l::io::mmap::Stream;
 use v4l::io::traits::OutputStream;
@@ -24,13 +20,16 @@ use v4l::prelude::Device;
 
 use crate::error::{CamShimError, Result};
 
-pub const OUTPUT_BUFFERS: u32 = 4;
-const OUTPUT_QUEUE_TIMEOUT: Duration = Duration::from_millis(100);
+pub const OUTPUT_BUFFERS: u32 = 2;
+const OUTPUT_QUEUE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackOutputState {
+    /// Output stream created; no filled buffers queued yet.
     Unprimed,
+    /// Bootstrap complete — safe for consumers to attach.
     Ready,
+    /// Capture session active; frames are submitted each tick.
     Streaming,
 }
 
@@ -61,24 +60,20 @@ impl<'a> LoopbackOutput<'a> {
         self.state
     }
 
-    /// Fill the first OUTPUT mmap buffer and start streaming.
-    ///
-    /// Does not QBUF here — `OutputStream::next()` on the first `submit()` queues
-    /// this filled buffer. An extra manual QBUF would leave buffer 0 in-flight and
-    /// make every subsequent `next()` re-queue it (EINVAL) → frozen capture.
+    /// Queue the first frame and pre-fill the next output buffer.
     pub fn prime(&mut self, frame: &[u8]) -> Result<()> {
         self.require_state(LoopbackOutputState::Unprimed, "prime")?;
         validate_frame(frame)?;
 
-        let (buf, meta) = OutputStream::next(&mut self.stream).map_err(CamShimError::Io)?;
-        write_frame_into_buffer(buf, meta, frame).map_err(CamShimError::Io)?;
+        self.queue_filled_buffer(frame)?;
+        self.queue_filled_buffer(frame)?;
 
         self.state = LoopbackOutputState::Ready;
-        tracing::debug!(state = ?self.state, "loopback primed (first frame queued on submit)");
+        tracing::debug!(state = ?self.state, "loopback primed for capture-side discovery");
         Ok(())
     }
 
-    /// Push one frame while streaming via mmap output.
+    /// Push one frame while streaming.
     pub fn submit(&mut self, frame: &[u8]) -> Result<()> {
         self.require_state_any(
             &[LoopbackOutputState::Ready, LoopbackOutputState::Streaming],
@@ -86,33 +81,17 @@ impl<'a> LoopbackOutput<'a> {
         )?;
         validate_frame(frame)?;
 
-        match self.queue_filled_buffer(frame) {
-            Ok(()) => {
-                self.state = LoopbackOutputState::Streaming;
-                Ok(())
-            }
-            Err(err) if Self::is_backpressure(&err) => {
-                tracing::debug!(%err, "loopback mmap submit skipped (backpressure)");
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        self.queue_filled_buffer(frame)?;
+        self.state = LoopbackOutputState::Streaming;
+        Ok(())
     }
 
     fn queue_filled_buffer(&mut self, frame: &[u8]) -> Result<()> {
         queue_filled_buffer(&mut self.stream, frame)
     }
 
-    pub fn is_backpressure(err: &CamShimError) -> bool {
-        match err {
-            CamShimError::Io(io_err) => is_mmap_backpressure(io_err),
-            _ => false,
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn is_queue_timeout(err: &CamShimError) -> bool {
-        Self::is_backpressure(err)
+        matches!(err, CamShimError::Io(io_err) if io_err.kind() == io::ErrorKind::TimedOut)
     }
 
     fn require_state(&self, expected: LoopbackOutputState, action: &str) -> Result<()> {
@@ -128,17 +107,6 @@ impl<'a> LoopbackOutput<'a> {
         }
         Err(invalid_state(action, self.state, expected))
     }
-}
-
-fn is_mmap_backpressure(err: &io::Error) -> bool {
-    if err.kind() == io::ErrorKind::TimedOut {
-        return true;
-    }
-
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EAGAIN) | Some(libc::EBUSY) | Some(libc::EINVAL)
-    )
 }
 
 fn queue_filled_buffer(stream: &mut Stream<'_>, frame: &[u8]) -> Result<()> {
@@ -237,12 +205,5 @@ mod tests {
         let mut buf = [0u8; 8];
         let mut meta = v4l::buffer::Metadata::default();
         assert!(write_frame_into_buffer(&mut buf, &mut meta, &[0; 16]).is_err());
-    }
-
-    #[test]
-    fn detects_mmap_backpressure() {
-        assert!(is_mmap_backpressure(&io::Error::from(io::ErrorKind::TimedOut)));
-        assert!(is_mmap_backpressure(&io::Error::from_raw_os_error(libc::EINVAL)));
-        assert!(!is_mmap_backpressure(&io::Error::from_raw_os_error(libc::ENODEV)));
     }
 }
