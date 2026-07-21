@@ -92,10 +92,6 @@ enum Commands {
         #[arg(long)]
         no_state_file: bool,
 
-        /// Keep the physical camera open always (LED stays on even when idle)
-        #[arg(long)]
-        always_capture: bool,
-
         /// Maximum negotiated capture width (default: 1920)
         #[arg(long, default_value_t = DEFAULT_MAX_CAPTURE_WIDTH)]
         max_width: u32,
@@ -185,7 +181,6 @@ fn main() -> anyhow::Result<()> {
             let config = default_shim_config(source, target);
             let config = cam_shim::ShimConfig {
                 target_fps,
-                pause_when_idle: false,
                 ..config
             };
             run_shim(config)?;
@@ -199,7 +194,6 @@ fn main() -> anyhow::Result<()> {
             stale_frame_secs,
             watchdog_secs,
             no_state_file,
-            always_capture,
             max_width,
             max_height,
         } => {
@@ -217,7 +211,6 @@ fn main() -> anyhow::Result<()> {
                 stale_frame_timeout: std::time::Duration::from_secs(stale_frame_secs),
                 watchdog_timeout: std::time::Duration::from_secs(watchdog_secs),
                 write_state_file: !no_state_file,
-                pause_when_idle: !always_capture,
                 max_capture_width: max_width,
                 max_capture_height: max_height,
             };
@@ -328,7 +321,6 @@ fn cmd_fix(device: &str, target_fps: u32, no_cleanup: bool) -> anyhow::Result<()
     let config = default_shim_config(device.to_string(), loopback.path.clone());
     let config = cam_shim::ShimConfig {
         target_fps,
-        pause_when_idle: false,
         ..config
     };
 

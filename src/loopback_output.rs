@@ -6,12 +6,9 @@
 //!
 //! ```text
 //!   Unprimed ──prime()──► Ready ──submit()──► Streaming
-//!                            ▲                    │
-//!                            └── hold_last_frame()┘
+//!                                              │
+//!                                              └── submit() ──► Streaming
 //! ```
-//!
-//! `hold_last_frame()` re-arms like `prime()`. While idle (no consumer), refresh
-//! the cached frame at a low keepalive rate so Video Capture stays visible.
 
 use std::io;
 use std::time::Duration;
@@ -41,13 +38,11 @@ pub enum LoopbackOutputState {
 enum OutputEvent {
     Prime,
     Submit,
-    Pause,
 }
 
 pub struct LoopbackOutput<'a> {
     stream: Stream<'a>,
     state: LoopbackOutputState,
-    last_frame: Option<Vec<u8>>,
 }
 
 impl<'a> LoopbackOutput<'a> {
@@ -58,7 +53,6 @@ impl<'a> LoopbackOutput<'a> {
         Ok(Self {
             stream,
             state: LoopbackOutputState::Unprimed,
-            last_frame: None,
         })
     }
 
@@ -74,61 +68,13 @@ impl<'a> LoopbackOutput<'a> {
         self.queue_filled_buffer(frame)?;
         self.queue_filled_buffer(frame)?;
 
-        remember_frame(&mut self.last_frame, frame);
         self.state = LoopbackOutputState::Ready;
         tracing::debug!(state = ?self.state, "loopback primed for capture-side discovery");
         Ok(())
     }
 
-    /// Push one frame while a capture session is active (or the first frame after resume).
+    /// Push one frame while streaming.
     pub fn submit(&mut self, frame: &[u8]) -> Result<()> {
-        self.queue_frame(frame, true)
-    }
-
-    /// Queue the cached last frame without copying it again (idle keepalive / resume).
-    pub fn submit_cached(&mut self) -> Result<()> {
-        self.require_state_any(
-            &[LoopbackOutputState::Ready, LoopbackOutputState::Streaming],
-            "submit",
-        )?;
-        let Some(frame) = self.last_frame.as_ref() else {
-            return Ok(());
-        };
-        validate_frame(frame)?;
-        queue_filled_buffer(&mut self.stream, frame)?;
-        self.state = LoopbackOutputState::Streaming;
-        Ok(())
-    }
-
-    /// Re-queue two filled buffers (same as bootstrap) so capture side reappears.
-    pub fn rearm_idle(&mut self) -> Result<()> {
-        let Some(frame) = self.last_frame.as_ref() else {
-            if self.state != LoopbackOutputState::Unprimed {
-                self.state = LoopbackOutputState::Ready;
-            }
-            return Ok(());
-        };
-
-        validate_frame(frame)?;
-        queue_filled_buffer(&mut self.stream, frame)?;
-        queue_filled_buffer(&mut self.stream, frame)?;
-        self.state = LoopbackOutputState::Ready;
-        Ok(())
-    }
-
-    /// Re-queue the last real frame before pausing physical capture.
-    pub fn hold_last_frame(&mut self) -> Result<()> {
-        match self.state {
-            LoopbackOutputState::Unprimed => Ok(()),
-            LoopbackOutputState::Ready | LoopbackOutputState::Streaming => {
-                self.rearm_idle()?;
-                tracing::debug!(state = ?self.state, "loopback held last frame on capture pause");
-                Ok(())
-            }
-        }
-    }
-
-    fn queue_frame(&mut self, frame: &[u8], remember: bool) -> Result<()> {
         self.require_state_any(
             &[LoopbackOutputState::Ready, LoopbackOutputState::Streaming],
             "submit",
@@ -136,9 +82,6 @@ impl<'a> LoopbackOutput<'a> {
         validate_frame(frame)?;
 
         self.queue_filled_buffer(frame)?;
-        if remember {
-            remember_frame(&mut self.last_frame, frame);
-        }
         self.state = LoopbackOutputState::Streaming;
         Ok(())
     }
@@ -169,18 +112,6 @@ impl<'a> LoopbackOutput<'a> {
 fn queue_filled_buffer(stream: &mut Stream<'_>, frame: &[u8]) -> Result<()> {
     let (buf, meta) = OutputStream::next(stream).map_err(CamShimError::Io)?;
     write_frame_into_buffer(buf, meta, frame).map_err(CamShimError::Io)
-}
-
-fn remember_frame(slot: &mut Option<Vec<u8>>, frame: &[u8]) {
-    match slot {
-        Some(existing) => {
-            existing.clear();
-            existing.extend_from_slice(frame);
-        }
-        None => {
-            *slot = Some(frame.to_vec());
-        }
-    }
 }
 
 fn validate_frame(frame: &[u8]) -> Result<()> {
@@ -237,7 +168,6 @@ fn next_state(current: LoopbackOutputState, event: OutputEvent) -> Option<Loopba
         (Unprimed, OutputEvent::Prime) => Some(Ready),
         (Ready, OutputEvent::Submit) => Some(Streaming),
         (Streaming, OutputEvent::Submit) => Some(Streaming),
-        (Streaming, OutputEvent::Pause) => Some(Ready),
         _ => None,
     }
 }
@@ -252,9 +182,7 @@ mod tests {
         assert_eq!(next_state(Unprimed, OutputEvent::Prime), Some(Ready));
         assert_eq!(next_state(Ready, OutputEvent::Submit), Some(Streaming));
         assert_eq!(next_state(Streaming, OutputEvent::Submit), Some(Streaming));
-        assert_eq!(next_state(Streaming, OutputEvent::Pause), Some(Ready));
         assert_eq!(next_state(Unprimed, OutputEvent::Submit), None);
-        assert_eq!(next_state(Ready, OutputEvent::Pause), None);
     }
 
     #[test]

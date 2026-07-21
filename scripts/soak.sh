@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Soak test: repeatedly open and close the cam-shim virtual camera.
 #
-# Exercises the pause/resume path (idle_when_no_consumer) and catches EINVAL,
-# worker crashes, and stale heartbeats.
+# Catches EINVAL, worker crashes, and stale heartbeats on reopen.
 #
 # Usage:
 #   # serve already running (started separately with sudo):
@@ -239,8 +238,8 @@ open_virtual_camera() {
   local rc=0
   local deadline=$((SECONDS + 5))
 
-  # Stream directly — a separate `v4l2-ctl --all` probe opens/closes the device
-  # and races with pause_when_idle (capture pauses before stream-mmap runs).
+  # Stream directly — avoid a separate `v4l2-ctl --all` probe that opens/closes
+  # the device before stream-mmap runs.
   while (( SECONDS < deadline )); do
     set +e
     output="$(timeout --signal=INT "${HOLD_SECS}s" \

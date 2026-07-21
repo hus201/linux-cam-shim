@@ -71,14 +71,13 @@ The **`serve`** command runs as a supervisor and polls for compatible cameras on
 ```bash
 sudo cam-shim serve
 sudo cam-shim serve --target-fps 30 --poll-secs 5
-sudo cam-shim serve --always-capture            # keep physical camera LED on when idle
 sudo cam-shim serve --max-width 1280 --max-height 720   # cap UVC negotiation
 ```
 
 The supervisor includes:
 
 - **Polling** — rescans for cameras every 30s by default (`--poll-secs` to tune)
-- **Idle pause** — physical camera LED off when no app is using the virtual camera
+- **Always capture** — physical camera stays open while a shim worker is running
 - **Startup self-check** — repair ghost nodes and remove orphan loopbacks
 - **Worker health** — restarts shims that stop producing frames
 - **Exponential backoff** — avoids crash/restart storms after failures
@@ -230,11 +229,11 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 | `scan` finds no cameras | Ghost nodes or unplugged camera | `sudo cam-shim restore` |
 | Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo modprobe v4l2loopback exclusive_caps=1`; check `cam-shim status` |
 | Only the physical camera shows up | `serve` not running, or camera is compatible | `cam-shim scan`; start `sudo cam-shim serve` |
-| Camera works once, fails on reopen | App left loopback open, or pause/resume bug | Close the app fully; run soak test (below); check logs for `EINVAL` |
+| Camera works once, fails on reopen | App left loopback open | Close the app fully; run soak test (below); check logs for `EINVAL` |
 | Physical camera moved off `/dev/video0` | Another virtual cam claimed a low number while the camera was unplugged | Unplug/replug the camera; cam-shim uses `video10+` so it does not take low numbers. Do not use `clean --all` unless you intend to remove other apps' virtual cams |
 | `clean` skips a device / busy | Not a cam-shim device, or an app holds our virtual cam | Expected for OBS/others; for ours: `sudo cam-shim clean --force` or `--force --reload` |
 | Ghost `/dev/video* (deleted)` nodes | Manual deletion of device nodes | `sudo cam-shim restore`; never delete `/dev/video*` by hand |
-| Physical LED stays on when idle | App still reading the virtual cam | Check `cam-shim status` for active readers; close the app |
+| Physical LED stays on | `serve` keeps the camera open while a shim is running | Expected; stop `serve` or unplug the camera to turn it off |
 | Camera quarantined after failures | Repeated shim crashes | `cam-shim status` for quarantined serials; fix underlying error, wait 120s, or restart serve |
 | `v4l2loopback-dkms` build fails on kernel 7.x | DKMS package not needed | Use the in-tree module: `modprobe v4l2loopback`; do not install `v4l2loopback-dkms` |
 
@@ -257,7 +256,7 @@ sudo cam-shim serve &   # or use systemd
 sudo ./scripts/soak.sh --start-serve --iterations 100
 ```
 
-The script repeatedly opens and closes the virtual camera to exercise pause/resume and catch EINVAL or worker crashes.
+The script repeatedly opens and closes the virtual camera to catch EINVAL or worker crashes on reopen.
 
 ## Project status
 

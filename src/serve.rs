@@ -40,7 +40,6 @@ pub struct ServeConfig {
     pub stale_frame_timeout: Duration,
     pub watchdog_timeout: Duration,
     pub write_state_file: bool,
-    pub pause_when_idle: bool,
     pub max_capture_width: u32,
     pub max_capture_height: u32,
 }
@@ -57,7 +56,6 @@ impl Default for ServeConfig {
             stale_frame_timeout: Duration::from_secs(DEFAULT_STALE_FRAME_SECS),
             watchdog_timeout: Duration::from_secs(DEFAULT_WATCHDOG_SECS),
             write_state_file: true,
-            pause_when_idle: true,
             max_capture_width: DEFAULT_MAX_CAPTURE_WIDTH,
             max_capture_height: DEFAULT_MAX_CAPTURE_HEIGHT,
         }
@@ -509,7 +507,6 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
         source_path: source_path.clone(),
         target_path: loopback.path.clone(),
         target_fps: config.target_fps,
-        pause_when_idle: config.pause_when_idle,
         max_capture_width: config.max_capture_width,
         max_capture_height: config.max_capture_height,
     };

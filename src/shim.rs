@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use v4l::buffer::Type;
 use v4l::format::FourCC;
@@ -17,57 +17,10 @@ use crate::compat::{
     DEFAULT_TARGET_FPS,
 };
 use crate::error::{CamShimError, Result};
-use crate::loopback::loopback_has_consumers;
 use crate::loopback_output::{LoopbackOutput, OUTPUT_BUFFERS};
 
 const ENODEV: i32 = 19;
 const CAPTURE_BUFFERS: u32 = 2;
-/// Ignore brief opens (e.g. `v4l2-ctl --all` probes) before pausing physical capture.
-const CONSUMER_IDLE_GRACE: Duration = Duration::from_millis(750);
-/// How often to poll `active_readers` while streaming (not every frame).
-const CONSUMER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// Idle keepalive rate — lower than stream fps to reduce loopback pressure.
-const IDLE_KEEPALIVE_FPS: u32 = 5;
-
-/// Debounce loopback consumer detection so probe opens do not pause capture.
-struct ConsumerGate {
-    last_consumer_at: Option<Instant>,
-    last_poll: Instant,
-    consumers_present: bool,
-}
-
-impl ConsumerGate {
-    fn new() -> Self {
-        Self {
-            last_consumer_at: None,
-            last_poll: Instant::now() - CONSUMER_POLL_INTERVAL,
-            consumers_present: false,
-        }
-    }
-
-    fn refresh(&mut self, target_path: &str) {
-        let now = Instant::now();
-        if now.duration_since(self.last_poll) < CONSUMER_POLL_INTERVAL {
-            return;
-        }
-        self.last_poll = now;
-        self.consumers_present = loopback_has_consumers(target_path);
-        if self.consumers_present {
-            self.last_consumer_at = Some(now);
-        }
-    }
-
-    /// True when capture should pause for lack of consumers (grace elapsed).
-    fn idle_elapsed(&mut self, target_path: &str) -> bool {
-        self.refresh(target_path);
-        if self.consumers_present {
-            return false;
-        }
-        self.last_consumer_at
-            .map(|seen| seen.elapsed() >= CONSUMER_IDLE_GRACE)
-            .unwrap_or(true)
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct CaptureLimits {
@@ -79,8 +32,6 @@ pub struct ShimConfig {
     pub source_path: String,
     pub target_path: String,
     pub target_fps: u32,
-    /// Close the physical camera when no app is reading the virtual device (LED off).
-    pub pause_when_idle: bool,
     /// Skip UVC modes wider than this when negotiating capture format.
     pub max_capture_width: u32,
     /// Skip UVC modes taller than this when negotiating capture format.
@@ -131,8 +82,6 @@ pub fn run_shim_until(
         touch_heartbeat(hb);
     }
 
-    let mut consumer_gate = ConsumerGate::new();
-
     tracing::info!(
         source = %config.source_path,
         target = %config.target_path,
@@ -142,25 +91,12 @@ pub fn run_shim_until(
         height = loopback_format.height,
         requested_fps = config.target_fps,
         loopback_fps,
-        pause_when_idle = config.pause_when_idle,
         max_capture_width = config.max_capture_width,
         max_capture_height = config.max_capture_height,
         "shim running"
     );
 
     while running.load(Ordering::SeqCst) {
-        if config.pause_when_idle && consumer_gate.idle_elapsed(&config.target_path) {
-            pause_physical_capture(&mut cap_stream);
-            idle_wait(
-                &running,
-                &config.target_path,
-                heartbeat.as_ref(),
-                &mut loopback_out,
-                &mut consumer_gate,
-            );
-            continue;
-        }
-
         if let Err(err) = run_capture_session(
             &config,
             &loopback_format,
@@ -168,7 +104,6 @@ pub fn run_shim_until(
             &mut loopback_out,
             &running,
             heartbeat.as_ref(),
-            &mut consumer_gate,
         ) {
             tracing::warn!(%err, "capture session error — retrying");
             pause_physical_capture(&mut cap_stream);
@@ -187,20 +122,8 @@ fn run_capture_session(
     loopback_out: &mut LoopbackOutput<'_>,
     running: &Arc<AtomicBool>,
     heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
-    consumer_gate: &mut ConsumerGate,
 ) -> Result<()> {
-    let _ = loopback_out.submit_cached();
-
-    tracing::debug!(source = %config.source_path, "physical capture resumed");
-
     while running.load(Ordering::SeqCst) {
-        if config.pause_when_idle && consumer_gate.idle_elapsed(&config.target_path) {
-            tracing::debug!(source = %config.source_path, "physical capture pausing");
-            pause_physical_capture(cap_stream);
-            loopback_out.hold_last_frame()?;
-            break;
-        }
-
         let (buffer, meta) = CaptureStream::next(cap_stream).map_err(CamShimError::Io)?;
         let frame = capture_frame_slice(buffer, meta)?;
         submit_loopback_frame(loopback_out, frame, &config.target_path, loopback_format)?;
@@ -253,44 +176,6 @@ fn capture_frame_slice<'a>(buffer: &'a [u8], meta: &v4l::buffer::Metadata) -> Re
         )));
     }
     Ok(&buffer[..len])
-}
-
-fn idle_wait(
-    running: &Arc<AtomicBool>,
-    target_path: &str,
-    heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
-    loopback_out: &mut LoopbackOutput<'_>,
-    consumer_gate: &mut ConsumerGate,
-) {
-    tracing::trace!("no virtual camera consumers — physical capture paused");
-    let keepalive_period = Duration::from_millis(1000 / u64::from(IDLE_KEEPALIVE_FPS.max(1)));
-    let mut last_log = Instant::now();
-    let mut next_keepalive = Instant::now();
-
-    while running.load(Ordering::SeqCst) && consumer_gate.idle_elapsed(target_path) {
-        if Instant::now() >= next_keepalive {
-            if let Err(err) = loopback_out.submit_cached() {
-                if LoopbackOutput::is_queue_timeout(&err) {
-                    tracing::trace!(%err, "idle loopback submit skipped (output backpressure)");
-                } else {
-                    tracing::warn!(%err, "idle loopback submit failed, rearming");
-                    if let Err(err) = loopback_out.rearm_idle() {
-                        tracing::warn!(%err, "loopback rearm after idle submit failure");
-                    }
-                }
-            }
-            next_keepalive = Instant::now() + keepalive_period;
-        }
-
-        if let Some(hb) = heartbeat {
-            touch_heartbeat(hb);
-        }
-        if last_log.elapsed() >= Duration::from_secs(30) {
-            tracing::debug!(target = target_path, "waiting for virtual camera consumer");
-            last_log = Instant::now();
-        }
-        thread::sleep(CONSUMER_POLL_INTERVAL);
-    }
 }
 
 fn open_source_device(path: &str) -> Result<Device> {
@@ -595,7 +480,6 @@ pub fn default_shim_config(source_path: String, target_path: String) -> ShimConf
         source_path,
         target_path,
         target_fps: DEFAULT_TARGET_FPS,
-        pause_when_idle: false,
         max_capture_width: DEFAULT_MAX_CAPTURE_WIDTH,
         max_capture_height: DEFAULT_MAX_CAPTURE_HEIGHT,
     }
@@ -633,18 +517,5 @@ mod tests {
         resolutions.retain(|(w, h)| resolution_within_cap(*w, *h, limits));
         resolutions.sort_by_key(|b| std::cmp::Reverse(b.0 * b.1));
         assert_eq!(resolutions[0], (1920, 1080));
-    }
-
-    #[test]
-    fn consumer_grace_holds_after_recent_consumer() {
-        let mut gate = ConsumerGate::new();
-        gate.last_consumer_at = Some(Instant::now());
-        assert!(!gate.idle_elapsed("/dev/nonexistent-cam-shim-test"));
-    }
-
-    #[test]
-    fn consumer_idle_without_history() {
-        let mut gate = ConsumerGate::new();
-        assert!(gate.idle_elapsed("/dev/nonexistent-cam-shim-test"));
     }
 }
