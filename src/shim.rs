@@ -134,7 +134,7 @@ fn run_shim_once(
         max_width: config.max_capture_width,
         max_height: config.max_capture_height,
     };
-    let source_format = configure_source(&mut source, limits)?;
+    let source_format = configure_source(&mut source, limits, running, heartbeat)?;
     if !running.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -146,7 +146,7 @@ fn run_shim_once(
     let capture_fps = native_capture_fps(&source, &source_format);
     let loopback_format = configure_target(&target, &source_format, config.target_fps)?;
 
-    let mut loopback_out = LoopbackOutput::open(&mut target, &config.target_path, OUTPUT_BUFFERS)?;
+    let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
     let mut cap_stream = open_capture_stream(&source)?;
     let latest_frame = read_first_capture_frame(&mut cap_stream, running, heartbeat)?;
     loopback_out.prime(&latest_frame)?;
@@ -193,7 +193,7 @@ fn run_shim_once(
                 max_width: config.max_capture_width,
                 max_height: config.max_capture_height,
             };
-            configure_source(&mut source, limits)?;
+            configure_source(&mut source, limits, running, heartbeat)?;
             cap_stream = open_capture_stream(&source)?;
             if let Ok(frame) = read_first_capture_frame(&mut cap_stream, running, heartbeat) {
                 latest_frame = frame;
@@ -376,11 +376,26 @@ fn open_source_device(path: &str) -> Result<Device> {
     ))))
 }
 
-fn configure_source(source: &mut Device, limits: CaptureLimits) -> Result<v4l::format::Format> {
+fn configure_source(
+    source: &mut Device,
+    limits: CaptureLimits,
+    running: &AtomicBool,
+    heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
+) -> Result<v4l::format::Format> {
     let candidates = capture_fourcc_candidates(source)?;
     let mut last_err: Option<CamShimError> = None;
 
     for fourcc in candidates {
+        if !running.load(Ordering::SeqCst) {
+            return Err(CamShimError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "shim stopped during capture format negotiation",
+            )));
+        }
+        if let Some(hb) = heartbeat {
+            touch_heartbeat(hb);
+        }
+
         match configure_source_with_fourcc(source, fourcc, limits) {
             Ok(format) => {
                 if is_uncompressed_video(fourcc) {

@@ -655,6 +655,8 @@ fn stop_managed(camera: ManagedCamera) {
     camera.stop.store(false, Ordering::SeqCst);
     join_worker_with_timeout(camera.worker, WORKER_JOIN_TIMEOUT);
 
+    let _ = crate::loopback::release_device_holders(&camera.loopback_path);
+
     if let Err(err) = remove_loopback_device(camera.loopback_index) {
         tracing::warn!(
             path = %camera.loopback_path,
