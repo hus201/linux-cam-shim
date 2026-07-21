@@ -12,6 +12,8 @@ use v4l::prelude::*;
 use v4l::video::output::Parameters as OutputParameters;
 use v4l::video::{Capture, Output};
 
+use libc;
+
 use crate::compat::{
     native_capture_fps_from_intervals, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
     DEFAULT_TARGET_FPS,
@@ -20,8 +22,9 @@ use crate::error::{CamShimError, Result};
 use crate::loopback_output::{LoopbackOutput, OUTPUT_BUFFERS};
 
 const ENODEV: i32 = 19;
-const CAPTURE_BUFFERS: u32 = 2;
+const CAPTURE_BUFFERS: u32 = 4;
 const CAPTURE_DRAIN_TIMEOUT: Duration = Duration::from_millis(2);
+const CAPTURE_REOPEN_DELAY: Duration = Duration::from_millis(100);
 
 /// Steady wall-clock pacing for loopback output (avoids bursty dup/drop).
 struct FramePacer {
@@ -112,12 +115,12 @@ pub fn run_shim_until(
     // v4l2loopback with exclusive_caps=1 only advertises Video Capture after a
     // producer attaches via STREAMON + mmap output. Raw write() does not count.
     let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
-    let mut cap_stream = Stream::with_buffers(&source, Type::VideoCapture, CAPTURE_BUFFERS)?;
-    cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
+    let mut cap_stream = open_capture_stream(&source)?;
     let (buffer, meta) = CaptureStream::next(&mut cap_stream).map_err(CamShimError::Io)?;
     let frame = capture_frame_slice(buffer, meta)?;
     let mut latest_frame = frame.to_vec();
     loopback_out.prime(frame)?;
+    cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
 
     if let Some(hb) = heartbeat.as_ref() {
         touch_heartbeat(hb);
@@ -149,7 +152,15 @@ pub fn run_shim_until(
         ) {
             tracing::warn!(%err, "capture session error — retrying");
             pause_physical_capture(&mut cap_stream);
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(CAPTURE_REOPEN_DELAY);
+            cap_stream = open_capture_stream(&source)?;
+            cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
+            if let Ok((buffer, meta)) = CaptureStream::next(&mut cap_stream) {
+                if let Ok(frame) = capture_frame_slice(buffer, meta) {
+                    latest_frame.clear();
+                    latest_frame.extend_from_slice(frame);
+                }
+            }
         }
     }
 
@@ -193,7 +204,7 @@ fn drain_capture_frames(cap_stream: &mut Stream<'_>, latest_frame: &mut Vec<u8>)
                 latest_frame.clear();
                 latest_frame.extend_from_slice(frame);
             }
-            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(err) if is_capture_would_block(&err) => break,
             Err(err) => return Err(CamShimError::Io(err)),
         }
     }
@@ -237,6 +248,18 @@ fn pause_physical_capture(stream: &mut Stream<'_>) {
     if let Err(err) = stream.stop() {
         tracing::debug!(%err, "capture stream stop (may already be off)");
     }
+}
+
+fn open_capture_stream(source: &Device) -> Result<Stream<'_>> {
+    Stream::with_buffers(source, Type::VideoCapture, CAPTURE_BUFFERS).map_err(CamShimError::Io)
+}
+
+fn is_capture_would_block(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        return true;
+    }
+
+    matches!(err.raw_os_error(), Some(libc::EAGAIN))
 }
 
 /// Validate capture metadata and return a slice into the mmap buffer.

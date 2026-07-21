@@ -229,7 +229,7 @@ fn video_index(path: &Path) -> Option<usize> {
 }
 
 /// UVC webcams often expose multiple `/dev/video*` nodes for one physical device.
-fn dedupe_by_physical_camera(reports: Vec<DeviceReport>) -> Vec<DeviceReport> {
+pub fn dedupe_by_physical_camera(reports: Vec<DeviceReport>) -> Vec<DeviceReport> {
     use std::collections::HashMap;
 
     let mut best: HashMap<String, DeviceReport> = HashMap::new();

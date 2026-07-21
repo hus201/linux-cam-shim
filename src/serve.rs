@@ -20,7 +20,7 @@ use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
     create_device_with_options, ensure_module_loaded, remove_loopback_device, CreateDeviceOptions,
 };
-use crate::probe::{scan_devices_with_options, ProbeDepth};
+use crate::probe::{scan_devices_with_options, dedupe_by_physical_camera, ProbeDepth};
 use crate::shim::{run_shim_until, ShimConfig};
 
 const DEFAULT_POLL_SECS: u64 = 5;
@@ -330,12 +330,6 @@ impl Supervisor {
 
             match start_managed(candidate, config) {
                 Ok(camera) => {
-                    tracing::info!(
-                        serial = %candidate.serial,
-                        source = %candidate.source_path,
-                        target = %camera.loopback_path,
-                        "shim started"
-                    );
                     state.record_success();
                     self.managed.insert(candidate.serial.clone(), camera);
                 }
@@ -526,7 +520,12 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
     // Always fully probe free devices. Held paths are already sysfs-only via
     // skip_paths — Quick mode only inspected the current format and often
     // mis-labeled NeedsShim cameras as Compatible after the first shim started.
-    for report in scan_devices_with_options(ProbeDepth::Full, skip_paths)? {
+    let reports = dedupe_by_physical_camera(scan_devices_with_options(
+        ProbeDepth::Full,
+        skip_paths,
+    )?);
+
+    for report in reports {
         if !report.needs_shim {
             tracing::debug!(
                 path = %report.path,
