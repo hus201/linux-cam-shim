@@ -41,6 +41,16 @@ pub fn camera_identity(source_device: &str) -> Result<CameraIdentity> {
     Ok(CameraIdentity { id_serial, nodes })
 }
 
+/// Lowest-numbered `/dev/video*` capture node for one physical camera.
+pub fn best_capture_path(source_device: &str) -> Result<String> {
+    let identity = camera_identity(source_device)?;
+    identity.nodes.into_iter().next().ok_or_else(|| {
+        crate::error::CamShimError::DeviceNotFound(format!(
+            "no capture node found for {source_device}"
+        ))
+    })
+}
+
 pub fn camera_serial_present(id_serial: &str) -> bool {
     related_video_nodes(id_serial).is_ok_and(|nodes| !nodes.is_empty())
 }
@@ -175,7 +185,25 @@ fn usb_device_sysfs_key(device_path: &str) -> Option<String> {
     None
 }
 
+fn is_metadata_node(device_path: &str) -> bool {
+    let Some(video_name) = Path::new(device_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+
+    let name_path = format!("/sys/class/video4linux/{video_name}/name");
+    fs::read_to_string(name_path)
+        .ok()
+        .is_some_and(|name| name.to_ascii_lowercase().contains("metadata"))
+}
+
 fn is_capture_device(device_path: &str) -> bool {
+    if is_metadata_node(device_path) {
+        return false;
+    }
+
     Device::with_path(device_path)
         .and_then(|dev| dev.query_caps())
         .map(|caps| caps.capabilities.contains(CapFlags::VIDEO_CAPTURE))

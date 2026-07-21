@@ -24,6 +24,8 @@ use crate::loopback_output::{LoopbackOutput, OUTPUT_BUFFERS};
 const ENODEV: i32 = 19;
 const CAPTURE_BUFFERS: u32 = 4;
 const CAPTURE_DRAIN_TIMEOUT: Duration = Duration::from_millis(2);
+const CAPTURE_PRIME_TIMEOUT: Duration = Duration::from_millis(500);
+const CAPTURE_PRIME_MAX_WAIT: Duration = Duration::from_secs(10);
 const CAPTURE_REOPEN_DELAY: Duration = Duration::from_millis(100);
 
 /// Steady wall-clock pacing for loopback output (avoids bursty dup/drop).
@@ -100,6 +102,30 @@ pub fn run_shim_until(
 ) -> Result<()> {
     running.store(true, Ordering::SeqCst);
 
+    while running.load(Ordering::SeqCst) {
+        match run_shim_once(&config, &running, heartbeat.as_ref()) {
+            Ok(()) => break,
+            Err(_err) if !running.load(Ordering::SeqCst) => break,
+            Err(err) => {
+                tracing::warn!(%err, "shim failed — retrying");
+                thread::sleep(CAPTURE_REOPEN_DELAY);
+            }
+        }
+    }
+
+    tracing::info!("shim stopped");
+    Ok(())
+}
+
+fn run_shim_once(
+    config: &ShimConfig,
+    running: &Arc<AtomicBool>,
+    heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
+) -> Result<()> {
+    if let Some(hb) = heartbeat {
+        touch_heartbeat(hb);
+    }
+
     let mut target = Device::with_path(&config.target_path)
         .map_err(|_| CamShimError::DeviceNotFound(config.target_path.clone()))?;
 
@@ -109,20 +135,24 @@ pub fn run_shim_until(
         max_height: config.max_capture_height,
     };
     let source_format = configure_source(&mut source, limits)?;
+    if !running.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    if let Some(hb) = heartbeat {
+        touch_heartbeat(hb);
+    }
+
     let capture_fps = native_capture_fps(&source, &source_format);
     let loopback_format = configure_target(&target, &source_format, config.target_fps)?;
 
-    // v4l2loopback with exclusive_caps=1 only advertises Video Capture after a
-    // producer attaches via STREAMON + mmap output. Raw write() does not count.
     let mut loopback_out = LoopbackOutput::open(&mut target, OUTPUT_BUFFERS)?;
     let mut cap_stream = open_capture_stream(&source)?;
-    let (buffer, meta) = CaptureStream::next(&mut cap_stream).map_err(CamShimError::Io)?;
-    let frame = capture_frame_slice(buffer, meta)?;
-    let mut latest_frame = frame.to_vec();
-    loopback_out.prime(frame)?;
+    let latest_frame = read_first_capture_frame(&mut cap_stream, running, heartbeat)?;
+    loopback_out.prime(&latest_frame)?;
     cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
 
-    if let Some(hb) = heartbeat.as_ref() {
+    if let Some(hb) = heartbeat {
         touch_heartbeat(hb);
     }
 
@@ -140,32 +170,69 @@ pub fn run_shim_until(
         "shim running"
     );
 
+    let mut latest_frame = latest_frame;
     while running.load(Ordering::SeqCst) {
         if let Err(err) = run_capture_session(
-            &config,
+            config,
             &loopback_format,
             &mut cap_stream,
             &mut loopback_out,
             &mut latest_frame,
-            &running,
-            heartbeat.as_ref(),
+            running,
+            heartbeat,
         ) {
             tracing::warn!(%err, "capture session error — retrying");
             pause_physical_capture(&mut cap_stream);
             thread::sleep(CAPTURE_REOPEN_DELAY);
-            cap_stream = open_capture_stream(&source)?;
-            cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
-            if let Ok((buffer, meta)) = CaptureStream::next(&mut cap_stream) {
-                if let Ok(frame) = capture_frame_slice(buffer, meta) {
-                    latest_frame.clear();
-                    latest_frame.extend_from_slice(frame);
-                }
+            if !running.load(Ordering::SeqCst) {
+                break;
             }
+            cap_stream = open_capture_stream(&source)?;
+            if let Ok(frame) = read_first_capture_frame(&mut cap_stream, running, heartbeat) {
+                latest_frame = frame;
+            }
+            cap_stream.set_timeout(CAPTURE_DRAIN_TIMEOUT);
         }
     }
 
-    tracing::info!("shim stopped");
     Ok(())
+}
+
+fn read_first_capture_frame(
+    cap_stream: &mut Stream<'_>,
+    running: &AtomicBool,
+    heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
+) -> Result<Vec<u8>> {
+    cap_stream.set_timeout(CAPTURE_PRIME_TIMEOUT);
+    let deadline = Instant::now() + CAPTURE_PRIME_MAX_WAIT;
+
+    while running.load(Ordering::SeqCst) {
+        if let Some(hb) = heartbeat {
+            touch_heartbeat(hb);
+        }
+
+        match CaptureStream::next(cap_stream) {
+            Ok((buffer, meta)) => {
+                let frame = capture_frame_slice(buffer, meta)?;
+                return Ok(frame.to_vec());
+            }
+            Err(err) if is_capture_would_block(&err) => {
+                if Instant::now() >= deadline {
+                    return Err(CamShimError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out waiting for first capture frame",
+                    )));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => return Err(CamShimError::Io(err)),
+        }
+    }
+
+    Err(CamShimError::Io(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "shim stopped while waiting for first capture frame",
+    )))
 }
 
 fn run_capture_session(

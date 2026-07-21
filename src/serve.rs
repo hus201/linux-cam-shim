@@ -14,7 +14,7 @@ use crate::hotplug::spawn_hotplug_monitor;
 
 use crate::compat::DEFAULT_TARGET_FPS;
 use crate::compat::{DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH};
-use crate::devices::{camera_identity, camera_serial_present, repair_video_devices};
+use crate::devices::{best_capture_path, camera_identity, camera_serial_present, repair_video_devices};
 use crate::error::Result;
 use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
@@ -32,6 +32,7 @@ const DEFAULT_BACKOFF_BASE_MS: u64 = 1_000;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 60_000;
 const DEFAULT_STALE_FRAME_SECS: u64 = 10;
 const DEFAULT_WATCHDOG_SECS: u64 = 30;
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 const STATE_DIR: &str = "/run/cam-shim";
 const STATE_FILE: &str = "/run/cam-shim/state.json";
 
@@ -214,8 +215,7 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 
     let mut hotplug_active = hotplug_handle.is_some();
 
-    supervisor.reconcile(&config, false)?;
-    last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
+    supervisor.reconcile(&config, false, &last_reconcile_ms)?;
 
     while !shutdown.load(Ordering::SeqCst) {
         let after_hotplug = if hotplug_active {
@@ -243,8 +243,7 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
             break;
         }
 
-        supervisor.reconcile(&config, after_hotplug)?;
-        last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
+        supervisor.reconcile(&config, after_hotplug, &last_reconcile_ms)?;
     }
 
     if let Some(handle) = hotplug_handle {
@@ -261,9 +260,17 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 }
 
 impl Supervisor {
-    fn reconcile(&mut self, config: &ServeConfig, after_hotplug: bool) -> Result<()> {
+    fn reconcile(
+        &mut self,
+        config: &ServeConfig,
+        after_hotplug: bool,
+        last_reconcile_ms: &Arc<AtomicU64>,
+    ) -> Result<()> {
         self.last_reconcile = Instant::now();
+        last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
         let now = Instant::now();
+
+        tracing::debug!(after_hotplug, "reconciling cameras");
 
         self.reap_dead_workers(config, now);
         self.reap_stale_workers(config, now);
@@ -349,6 +356,7 @@ impl Supervisor {
             let _ = write_state_snapshot(self, now);
         }
 
+        last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -517,11 +525,10 @@ fn discover_candidates_with_settle(
 fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate>> {
     let mut by_serial: HashMap<String, ShimCandidate> = HashMap::new();
 
-    // Always fully probe free devices. Held paths are already sysfs-only via
-    // skip_paths — Quick mode only inspected the current format and often
-    // mis-labeled NeedsShim cameras as Compatible after the first shim started.
+    // Quick probe — Full enumeration of every format/size can take 30s+ per camera
+    // and stalls the supervisor; scan uses Full when the user explicitly asks.
     let reports = dedupe_by_physical_camera(scan_devices_with_options(
-        ProbeDepth::Full,
+        ProbeDepth::Quick,
         skip_paths,
     )?);
 
@@ -543,6 +550,24 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
             }
         };
 
+        let source_path = best_capture_path(&report.path).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %report.path,
+                nodes = ?identity.nodes,
+                %err,
+                "could not resolve primary capture node — using probed path"
+            );
+            report.path.clone()
+        });
+
+        if source_path != report.path {
+            tracing::info!(
+                probed = %report.path,
+                capture = %source_path,
+                "using primary capture node"
+            );
+        }
+
         if by_serial.contains_key(&identity.id_serial) {
             continue;
         }
@@ -551,7 +576,7 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
             identity.id_serial.clone(),
             ShimCandidate {
                 serial: identity.id_serial,
-                source_path: report.path,
+                source_path,
                 label: report.standardized_name,
             },
         );
@@ -628,7 +653,7 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
 
 fn stop_managed(camera: ManagedCamera) {
     camera.stop.store(false, Ordering::SeqCst);
-    let _ = camera.worker.join();
+    join_worker_with_timeout(camera.worker, WORKER_JOIN_TIMEOUT);
 
     if let Err(err) = remove_loopback_device(camera.loopback_index) {
         tracing::warn!(
@@ -639,6 +664,22 @@ fn stop_managed(camera: ManagedCamera) {
     }
 
     let _ = repair_video_devices();
+}
+
+fn join_worker_with_timeout(worker: JoinHandle<()>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if worker.is_finished() {
+            let _ = worker.join();
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    tracing::warn!(
+        timeout_secs = timeout.as_secs(),
+        "shim worker did not exit in time — continuing cleanup (device may stay open briefly)"
+    );
 }
 
 fn heartbeat_age(last_ms: u64) -> Duration {
