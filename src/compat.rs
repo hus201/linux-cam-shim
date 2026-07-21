@@ -116,14 +116,15 @@ impl CompatReport {
     }
 }
 
-/// Loopback fps metadata: keep the configured target when 30/60 is available,
-/// otherwise advertise the camera's native rate (e.g. 25 fps PAL webcams).
-pub fn loopback_fps_from_intervals(intervals: &[FrameInterval], requested: u32) -> u32 {
-    let report = CompatReport::from_intervals(intervals);
-    if report.advertised_fps.iter().any(FpsRate::is_standard) {
-        return requested;
-    }
+/// Loopback fps metadata for a shim. Matches paced output (`target_fps`), not
+/// the physical camera's native rate.
+pub fn loopback_fps_from_intervals(_intervals: &[FrameInterval], requested: u32) -> u32 {
+    requested.max(1)
+}
 
+/// Highest fixed fps the camera advertises for a negotiated capture mode.
+pub fn native_capture_fps_from_intervals(intervals: &[FrameInterval]) -> Option<u32> {
+    let report = CompatReport::from_intervals(intervals);
     report
         .advertised_fps
         .iter()
@@ -134,7 +135,6 @@ pub fn loopback_fps_from_intervals(intervals: &[FrameInterval], requested: u32) 
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(FpsRate::as_u32_fps)
-        .unwrap_or(requested)
 }
 
 pub fn standardized_label(original_name: &str) -> String {
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_fps_uses_native_rate_when_not_standard() {
+    fn loopback_fps_matches_shim_target() {
         let intervals = [FrameInterval {
             index: 0,
             fourcc: FourCC::new(b"MJPG"),
@@ -234,11 +234,24 @@ mod tests {
             typ: 0,
             interval: FrameIntervalEnum::Discrete(Fraction::new(1, 25)),
         }];
-        assert_eq!(loopback_fps_from_intervals(&intervals, 30), 25);
+        assert_eq!(loopback_fps_from_intervals(&intervals, 30), 30);
     }
 
     #[test]
-    fn loopback_fps_keeps_requested_when_standard_available() {
+    fn native_capture_fps_reads_camera_rate() {
+        let intervals = [FrameInterval {
+            index: 0,
+            fourcc: FourCC::new(b"MJPG"),
+            width: 1920,
+            height: 1080,
+            typ: 0,
+            interval: FrameIntervalEnum::Discrete(Fraction::new(1, 25)),
+        }];
+        assert_eq!(native_capture_fps_from_intervals(&intervals), Some(25));
+    }
+
+    #[test]
+    fn native_capture_fps_with_standard_modes() {
         let intervals = [
             FrameInterval {
                 index: 0,
@@ -257,6 +270,7 @@ mod tests {
                 interval: FrameIntervalEnum::Discrete(Fraction::new(1, 30)),
             },
         ];
+        assert_eq!(native_capture_fps_from_intervals(&intervals), Some(30));
         assert_eq!(loopback_fps_from_intervals(&intervals, 30), 30);
     }
 }

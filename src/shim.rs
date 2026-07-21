@@ -13,7 +13,7 @@ use v4l::video::output::Parameters as OutputParameters;
 use v4l::video::{Capture, Output};
 
 use crate::compat::{
-    loopback_fps_from_intervals, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
+    native_capture_fps_from_intervals, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
     DEFAULT_TARGET_FPS,
 };
 use crate::error::{CamShimError, Result};
@@ -106,8 +106,8 @@ pub fn run_shim_until(
         max_height: config.max_capture_height,
     };
     let source_format = configure_source(&mut source, limits)?;
-    let loopback_fps = resolve_loopback_fps(&source, &source_format, config.target_fps);
-    let loopback_format = configure_target(&target, &source_format, loopback_fps)?;
+    let capture_fps = native_capture_fps(&source, &source_format);
+    let loopback_format = configure_target(&target, &source_format, config.target_fps)?;
 
     // v4l2loopback with exclusive_caps=1 only advertises Video Capture after a
     // producer attaches via STREAMON + mmap output. Raw write() does not count.
@@ -130,9 +130,8 @@ pub fn run_shim_until(
         target_fourcc = %loopback_format.fourcc,
         width = loopback_format.width,
         height = loopback_format.height,
-        requested_fps = config.target_fps,
-        loopback_fps,
-        output_fps = config.target_fps,
+        target_fps = config.target_fps,
+        capture_fps = capture_fps.unwrap_or(0),
         max_capture_width = config.max_capture_width,
         max_capture_height = config.max_capture_height,
         "shim running"
@@ -447,39 +446,25 @@ fn configure_target(
     Ok(format)
 }
 
-fn resolve_loopback_fps(
-    source: &Device,
-    source_format: &v4l::format::Format,
-    requested: u32,
-) -> u32 {
-    let intervals = match Capture::enum_frameintervals(
+fn native_capture_fps(source: &Device, source_format: &v4l::format::Format) -> Option<u32> {
+    let intervals = Capture::enum_frameintervals(
         source,
         source_format.fourcc,
         source_format.width,
         source_format.height,
-    ) {
-        Ok(intervals) => intervals,
-        Err(err) => {
-            tracing::debug!(
-                %err,
-                fourcc = %source_format.fourcc,
-                width = source_format.width,
-                height = source_format.height,
-                "could not read capture frame intervals — using requested loopback fps"
-            );
-            return requested;
-        }
-    };
-
-    let loopback_fps = loopback_fps_from_intervals(&intervals, requested);
-    if loopback_fps != requested {
-        tracing::info!(
-            requested_fps = requested,
-            loopback_fps,
-            "advertising native capture fps on loopback"
+    )
+    .map_err(|err| {
+        tracing::debug!(
+            %err,
+            fourcc = %source_format.fourcc,
+            width = source_format.width,
+            height = source_format.height,
+            "could not read capture frame intervals"
         );
-    }
-    loopback_fps
+    })
+    .ok()?;
+
+    native_capture_fps_from_intervals(&intervals)
 }
 
 fn pick_capture_fourcc(source: &Device) -> Result<FourCC> {

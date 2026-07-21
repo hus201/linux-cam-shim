@@ -19,9 +19,9 @@ pub use camera_view::{
     DeviceView, RecommendedDevice, ScanReport,
 };
 pub use compat::{
-    kernel_card_label, kernel_card_label_bytes, loopback_fps_from_intervals, standardized_label,
-    CompatReport, CompatStatus, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
-    DEFAULT_TARGET_FPS,
+    kernel_card_label, kernel_card_label_bytes, loopback_fps_from_intervals,
+    native_capture_fps_from_intervals, standardized_label, CompatReport, CompatStatus,
+    DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH, DEFAULT_TARGET_FPS,
 };
 pub use devices::{
     camera_identity, camera_serial_present, device_id_serial, ghost_device_count,
