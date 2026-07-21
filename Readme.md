@@ -136,7 +136,7 @@ sudo cam-shim fix --device /dev/video2 --target-fps 30
 sudo cam-shim fix --device /dev/video2 --no-cleanup   # keep virtual cam after exit
 ```
 
-Resolution is chosen automatically at the **highest MJPEG size at or below 1920×1080** (capped to reduce driver quirks on cheap UVC cams).
+Resolution is chosen automatically at the **highest mode at or below 1920×1080** — MJPEG when available, otherwise YUYV or other uncompressed formats.
 
 ### Check runtime status
 
@@ -199,7 +199,7 @@ sudo cam-shim install
 
 1. **Scan** — enumerate physical and virtual V4L2 devices; flag compat issues; pair physical cameras with their standardized loopback.
 2. **Compat check** — flag devices missing 30/60 fps or reporting variable frame rate.
-3. **Shim** — capture MJPEG from the physical device at native rate; pace output at `target_fps` (dup/drop); write to v4l2loopback with matching fps metadata.
+3. **Shim** — capture MJPEG or uncompressed YUV (YUYV, NV12, …) from the physical device at native rate; pace output at `target_fps` (dup/drop); write to v4l2loopback with matching fps metadata.
 4. **Serve** — supervisor reacts to hotplug (with settle retry) and manages shims automatically.
 
 Both the physical camera and the virtual **Linux Standardized** device stay visible. Pick the standardized one in your app.
@@ -287,12 +287,11 @@ The script repeatedly opens and closes the virtual camera to catch EINVAL or wor
 | Area | Status |
 |------|--------|
 | UVC scan + compat detection | Done |
-| MJPEG shim + paced `target_fps` output | Done |
+| MJPEG + YUYV/uncompressed relay + paced output | Done |
 | Netlink hotplug + settle retry + fallback poll | Done |
 | Scan/status UX (physical vs virtual, recommendations) | Done |
 | Stable loopback index (`/var/lib/cam-shim/devices.json`) | Done |
 | Always-on capture (no idle pause) | Done |
-| YUYV / raw capture path | Not yet |
 | PipeWire / Flatpak portal polish | Not yet |
 | Rootless operation | Not yet |
 | Soak test in CI | Manual (`scripts/soak.sh`) |

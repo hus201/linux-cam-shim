@@ -272,7 +272,41 @@ fn open_source_device(path: &str) -> Result<Device> {
 }
 
 fn configure_source(source: &mut Device, limits: CaptureLimits) -> Result<v4l::format::Format> {
-    let fourcc = pick_capture_fourcc(source)?;
+    let candidates = capture_fourcc_candidates(source)?;
+    let mut last_err: Option<CamShimError> = None;
+
+    for fourcc in candidates {
+        match configure_source_with_fourcc(source, fourcc, limits) {
+            Ok(format) => {
+                if is_uncompressed_video(fourcc) {
+                    tracing::info!(
+                        %fourcc,
+                        width = format.width,
+                        height = format.height,
+                        "using uncompressed capture (no MJPEG available)"
+                    );
+                }
+                return Ok(format);
+            }
+            Err(err) => {
+                tracing::debug!(%fourcc, %err, "capture format not usable, trying next");
+                last_err = Some(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        CamShimError::Io(std::io::Error::other(
+            "no usable capture format on source device",
+        ))
+    }))
+}
+
+fn configure_source_with_fourcc(
+    source: &mut Device,
+    fourcc: FourCC,
+    limits: CaptureLimits,
+) -> Result<v4l::format::Format> {
     let resolutions = pick_sizes_sorted(source, fourcc, limits)?;
 
     if resolutions.is_empty() {
@@ -327,6 +361,62 @@ fn configure_source(source: &mut Device, limits: CaptureLimits) -> Result<v4l::f
         &format,
         last_err.unwrap_or_else(|| std::io::Error::other("no usable capture resolution")),
     ))
+}
+
+/// Prefer MJPEG, then other compressed codecs, then common uncompressed YUV.
+fn capture_fourcc_candidates(source: &Device) -> Result<Vec<FourCC>> {
+    use std::collections::HashSet;
+
+    let mut candidates = Vec::new();
+    let mut seen: HashSet<[u8; 4]> = HashSet::new();
+
+    let current = Capture::format(source)?;
+
+    if is_compressed(current.fourcc) {
+        push_unique_fourcc(current.fourcc, &mut candidates, &mut seen);
+    }
+
+    let mjpg = FourCC::new(b"MJPG");
+    if Capture::enum_framesizes(source, mjpg)
+        .is_ok_and(|sizes| !discrete_sizes(&sizes).is_empty())
+    {
+        push_unique_fourcc(mjpg, &mut candidates, &mut seen);
+    }
+
+    for format in Capture::enum_formats(source)? {
+        if is_compressed(format.fourcc) {
+            push_unique_fourcc(format.fourcc, &mut candidates, &mut seen);
+        }
+    }
+
+    for repr in [b"YUYV", b"UYVY", b"NV12", b"NV21", b"RGB3", b"BGR3"] {
+        let fourcc = FourCC::new(repr);
+        if Capture::enum_framesizes(source, fourcc)
+            .is_ok_and(|sizes| !discrete_sizes(&sizes).is_empty())
+        {
+            push_unique_fourcc(fourcc, &mut candidates, &mut seen);
+        }
+    }
+
+    if !is_compressed(current.fourcc) {
+        push_unique_fourcc(current.fourcc, &mut candidates, &mut seen);
+    }
+
+    if candidates.is_empty() {
+        push_unique_fourcc(current.fourcc, &mut candidates, &mut seen);
+    }
+
+    Ok(candidates)
+}
+
+fn push_unique_fourcc(
+    fourcc: FourCC,
+    candidates: &mut Vec<FourCC>,
+    seen: &mut std::collections::HashSet<[u8; 4]>,
+) {
+    if seen.insert(fourcc.repr) {
+        candidates.push(fourcc);
+    }
 }
 
 fn pick_sizes_sorted(
@@ -467,25 +557,6 @@ fn native_capture_fps(source: &Device, source_format: &v4l::format::Format) -> O
     native_capture_fps_from_intervals(&intervals)
 }
 
-fn pick_capture_fourcc(source: &Device) -> Result<FourCC> {
-    let current = Capture::format(source)?;
-    if is_compressed(current.fourcc) {
-        return Ok(current.fourcc);
-    }
-
-    if Capture::enum_framesizes(source, FourCC::new(b"MJPG")).is_ok_and(|s| !s.is_empty()) {
-        return Ok(FourCC::new(b"MJPG"));
-    }
-
-    for format in Capture::enum_formats(source)? {
-        if is_compressed(format.fourcc) {
-            return Ok(format.fourcc);
-        }
-    }
-
-    Ok(current.fourcc)
-}
-
 fn discrete_sizes(sizes: &[FrameSize]) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for size in sizes {
@@ -515,6 +586,13 @@ fn is_compressed(fourcc: FourCC) -> bool {
     matches!(
         &fourcc.repr,
         b"MJPG" | b"JPEG" | b"H264" | b"HEVC" | b"MPEG" | b"MPG1" | b"MPG2" | b"MPG4"
+    )
+}
+
+fn is_uncompressed_video(fourcc: FourCC) -> bool {
+    matches!(
+        &fourcc.repr,
+        b"YUYV" | b"UYVY" | b"NV12" | b"NV21" | b"RGB3" | b"BGR3" | b"YUV4" | b"GREY"
     )
 }
 
@@ -551,6 +629,13 @@ mod tests {
     fn detects_compressed_fourcc() {
         assert!(is_compressed(FourCC::new(b"MJPG")));
         assert!(!is_compressed(FourCC::new(b"YUYV")));
+    }
+
+    #[test]
+    fn detects_uncompressed_fourcc() {
+        assert!(is_uncompressed_video(FourCC::new(b"YUYV")));
+        assert!(is_uncompressed_video(FourCC::new(b"NV12")));
+        assert!(!is_uncompressed_video(FourCC::new(b"MJPG")));
     }
 
     #[test]
