@@ -66,17 +66,19 @@ cam-shim scan --json
 
 ### Run continuously (recommended)
 
-The **`serve`** command runs as a supervisor and polls for compatible cameras on a fixed interval.
+The **`serve`** command runs as a supervisor: **netlink hotplug** for instant camera detection, with a periodic fallback poll as a safety net.
 
 ```bash
 sudo cam-shim serve
-sudo cam-shim serve --target-fps 30 --poll-secs 5
+sudo cam-shim serve --target-fps 30
+sudo cam-shim serve --no-hotplug --poll-secs 2   # polling only
 sudo cam-shim serve --max-width 1280 --max-height 720   # cap UVC negotiation
 ```
 
 The supervisor includes:
 
-- **Polling** — rescans for cameras every 30s by default (`--poll-secs` to tune)
+- **Netlink hotplug** — reacts within ~200ms when cameras are plugged or unplugged
+- **Fallback poll** — safety reconcile every 5s by default if an event is missed (`--poll-secs` to tune)
 - **Always capture** — physical camera stays open while a shim worker is running
 - **Startup self-check** — repair ghost nodes and remove orphan loopbacks
 - **Worker health** — restarts shims that stop producing frames
@@ -85,7 +87,7 @@ The supervisor includes:
 - **Watchdog** — logs if the reconcile loop stalls
 - **State file** — `/run/cam-shim/state.json` for observability
 
-Tuning flags: `--max-failures`, `--quarantine-secs`, `--backoff-ms`, `--stale-frame-secs`, `--watchdog-secs`, `--no-state-file`, `--max-width`, `--max-height`
+Tuning flags: `--no-hotplug`, `--max-failures`, `--quarantine-secs`, `--backoff-ms`, `--stale-frame-secs`, `--watchdog-secs`, `--no-state-file`, `--max-width`, `--max-height`
 
 **Optional: systemd** (unit ships with the `.deb`, disabled by default — enable only after `serve` works for you):
 

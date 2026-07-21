@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use std::collections::HashSet;
+
+use crate::hotplug::spawn_hotplug_monitor;
 
 use crate::compat::DEFAULT_TARGET_FPS;
 use crate::compat::{DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH};
@@ -20,7 +23,7 @@ use crate::loopback::{
 use crate::probe::{scan_devices_with_options, ProbeDepth};
 use crate::shim::{run_shim_until, ShimConfig};
 
-const DEFAULT_POLL_SECS: u64 = 30;
+const DEFAULT_POLL_SECS: u64 = 5;
 const DEFAULT_MAX_FAILURES: u32 = 5;
 const DEFAULT_QUARANTINE_SECS: u64 = 120;
 const DEFAULT_BACKOFF_BASE_MS: u64 = 1_000;
@@ -40,6 +43,7 @@ pub struct ServeConfig {
     pub stale_frame_timeout: Duration,
     pub watchdog_timeout: Duration,
     pub write_state_file: bool,
+    pub hotplug: bool,
     pub max_capture_width: u32,
     pub max_capture_height: u32,
 }
@@ -56,6 +60,7 @@ impl Default for ServeConfig {
             stale_frame_timeout: Duration::from_secs(DEFAULT_STALE_FRAME_SECS),
             watchdog_timeout: Duration::from_secs(DEFAULT_WATCHDOG_SECS),
             write_state_file: true,
+            hotplug: true,
             max_capture_width: DEFAULT_MAX_CAPTURE_WIDTH,
             max_capture_height: DEFAULT_MAX_CAPTURE_HEIGHT,
         }
@@ -185,17 +190,45 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
     tracing::info!(
         target_fps = config.target_fps,
         poll_ms = config.poll_interval.as_millis(),
+        hotplug = config.hotplug,
         max_failures = config.max_failures,
         quarantine_secs = config.quarantine_duration.as_secs(),
         stale_frame_secs = config.stale_frame_timeout.as_secs(),
         "cam-shim supervisor started"
     );
 
+    let (hotplug_tx, hotplug_rx) = mpsc::channel();
+    let hotplug_handle = if config.hotplug {
+        match spawn_hotplug_monitor(shutdown.clone(), hotplug_tx) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::warn!(%err, "netlink hotplug disabled — using polling only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut hotplug_active = hotplug_handle.is_some();
+
     supervisor.reconcile(&config)?;
     last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
 
     while !shutdown.load(Ordering::SeqCst) {
-        thread::sleep(config.poll_interval);
+        if hotplug_active {
+            match hotplug_rx.recv_timeout(config.poll_interval) {
+                Ok(()) => tracing::debug!("reconciling after netlink hotplug event"),
+                Err(RecvTimeoutError::Timeout) => tracing::trace!("reconciling on fallback poll"),
+                Err(RecvTimeoutError::Disconnected) => {
+                    tracing::warn!("hotplug monitor stopped — continuing with fallback polling");
+                    hotplug_active = false;
+                    continue;
+                }
+            }
+        } else {
+            thread::sleep(config.poll_interval);
+        }
 
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -203,6 +236,10 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 
         supervisor.reconcile(&config)?;
         last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
+    }
+
+    if let Some(handle) = hotplug_handle {
+        let _ = handle.join();
     }
 
     tracing::info!("cam-shim supervisor shutting down");

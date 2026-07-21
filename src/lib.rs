@@ -2,6 +2,7 @@ pub mod compat;
 pub mod devices;
 pub mod doctor;
 pub mod error;
+pub mod hotplug;
 pub mod loopback;
 pub mod loopback_output;
 pub mod probe;

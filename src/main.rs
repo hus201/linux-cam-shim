@@ -64,9 +64,13 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_TARGET_FPS)]
         target_fps: u32,
 
-        /// Poll interval in seconds
-        #[arg(long, default_value = "30")]
+        /// Fallback poll interval in seconds (safety net with netlink hotplug)
+        #[arg(long, default_value = "5")]
         poll_secs: u64,
+
+        /// Disable netlink hotplug and scan on a fixed interval only
+        #[arg(long)]
+        no_hotplug: bool,
 
         /// Failures before a camera is quarantined
         #[arg(long, default_value_t = 5)]
@@ -188,6 +192,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Serve {
             target_fps,
             poll_secs,
+            no_hotplug,
             max_failures,
             quarantine_secs,
             backoff_ms,
@@ -211,6 +216,7 @@ fn main() -> anyhow::Result<()> {
                 stale_frame_timeout: std::time::Duration::from_secs(stale_frame_secs),
                 watchdog_timeout: std::time::Duration::from_secs(watchdog_secs),
                 write_state_file: !no_state_file,
+                hotplug: !no_hotplug,
                 max_capture_width: max_width,
                 max_capture_height: max_height,
             };
