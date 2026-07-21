@@ -4,11 +4,11 @@ use tracing_subscriber::EnvFilter;
 use cam_shim::unload_loopback_module;
 use cam_shim::{
     clean_loopback_devices, collect_status, create_device, default_shim_config,
-    ensure_module_loaded, format_holder_list, ghost_device_count, list_device_holders,
-    list_loopback_devices, print_doctor_report, print_status, probe_device_path, repair_devices,
-    run_doctor, run_shim, run_supervisor, scan_devices, standardized_label, stop_cam_shim_processes,
-    DoctorConfig, FixSession, ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
-    DEFAULT_TARGET_FPS,
+    ensure_module_loaded, format_device_line, format_holder_list, ghost_device_count,
+    list_device_holders, list_loopback_devices, print_doctor_report, print_status,
+    probe_device_path, repair_devices, run_doctor, run_shim, run_supervisor,
+    collect_scan_report, standardized_label, stop_cam_shim_processes, DoctorConfig, FixSession,
+    ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH, DEFAULT_TARGET_FPS,
 };
 
 #[derive(Parser)]
@@ -255,14 +255,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_scan(json: bool) -> anyhow::Result<()> {
-    let devices = scan_devices()?;
+    let report = collect_scan_report()?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&devices)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 
-    if devices.is_empty() {
+    if report.devices.is_empty() {
         let ghosts = ghost_device_count().unwrap_or(0);
         if ghosts > 0 {
             println!("No V4L2 capture devices found.");
@@ -276,30 +276,50 @@ fn cmd_scan(json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    for device in devices {
-        let status = if device.compatible {
-            "compatible"
-        } else if device.needs_shim {
-            "needs shim"
-        } else {
-            "unknown"
-        };
+    if report.serve_running {
+        println!("cam-shim serve is running — pick the virtual camera marked [virtual, use this]");
+    } else {
+        println!("cam-shim serve is not running — start it to create virtual cameras automatically");
+    }
+    println!();
 
-        println!("{} — {}", device.path, device.name);
-        println!("  driver: {}", device.driver);
-        println!("  bus:    {}", device.bus);
-        println!("  standardized name: {}", device.standardized_name);
-        println!("  status: {status}");
-
+    for device in &report.devices {
+        println!("{}", format_device_line(device));
+        if let Some(paired) = &device.paired_with {
+            println!("  paired with: {paired}");
+        }
+        if let Some(driver) = &device.driver {
+            if !driver.is_empty() {
+                println!("  driver: {driver}");
+            }
+        }
+        if let Some(bus) = &device.bus {
+            if !bus.is_empty() {
+                println!("  bus:    {bus}");
+            }
+        }
+        if let Some(name) = &device.standardized_name {
+            if device.needs_shim {
+                println!("  expected virtual name: {name}");
+            }
+        }
         if !device.advertised_fps.is_empty() {
             println!("  fps:    {}", device.advertised_fps.join(", "));
         }
-
         for issue in &device.issues {
             println!("  issue:  {issue}");
         }
-
         println!();
+    }
+
+    if !report.recommended_devices.is_empty() {
+        println!("Recommended for apps");
+        for device in &report.recommended_devices {
+            println!(
+                "  {} — {} (instead of {})",
+                device.path, device.name, device.for_physical
+            );
+        }
     }
 
     Ok(())

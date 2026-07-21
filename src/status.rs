@@ -2,9 +2,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::camera_view::{device_views_from_snapshot, format_device_line, role_label, DeviceView, RecommendedDevice};
 use crate::error::Result;
 use crate::loopback::loopback_consumer_count;
-use crate::probe::DeviceReport;
 use crate::runtime::{
     age_ms_since, collect_runtime_snapshot, heartbeat_age_secs, heartbeat_is_stale, ProcessHolder,
     RuntimeSnapshot, HEARTBEAT_STALE_SECS, STATE_FILE,
@@ -23,6 +23,10 @@ pub struct StatusReport {
     pub managed: Vec<ManagedStatus>,
     pub quarantined: Vec<String>,
     pub loopbacks: Vec<LoopbackStatus>,
+    pub devices: Vec<DeviceView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommended_devices: Vec<RecommendedDevice>,
+    /// Legacy alias — physical capture devices only.
     pub visible_cameras: Vec<CameraStatus>,
 }
 
@@ -52,14 +56,25 @@ pub struct CameraStatus {
     pub standardized_name: String,
     pub needs_shim: bool,
     pub compatible: bool,
+    pub role: String,
+    pub tags: Vec<String>,
+    pub paired_with: Option<String>,
+    pub use_in_apps: bool,
 }
 
 pub fn collect_status() -> Result<StatusReport> {
     let snapshot = collect_runtime_snapshot()?;
+    let views = device_views_from_snapshot(&snapshot);
     let visible_cameras = snapshot
         .devices
         .iter()
-        .map(device_report_to_status)
+        .map(|device| {
+            let view = views
+                .devices
+                .iter()
+                .find(|entry| entry.path == device.path && entry.role == crate::camera_view::DeviceRole::Physical);
+            device_report_to_status(device, view)
+        })
         .collect();
 
     let state_age_ms = snapshot
@@ -83,17 +98,25 @@ pub fn collect_status() -> Result<StatusReport> {
             .map(|state| state.quarantined.clone())
             .unwrap_or_default(),
         loopbacks: loopback_status(&snapshot),
+        devices: views.devices,
+        recommended_devices: views.recommended_devices,
         visible_cameras,
     })
 }
 
-fn device_report_to_status(device: &DeviceReport) -> CameraStatus {
+fn device_report_to_status(device: &crate::probe::DeviceReport, view: Option<&DeviceView>) -> CameraStatus {
     CameraStatus {
         path: device.path.clone(),
         name: device.name.clone(),
         standardized_name: device.standardized_name.clone(),
         needs_shim: device.needs_shim,
         compatible: device.compatible,
+        role: view
+            .map(|entry| role_label(entry.role).into())
+            .unwrap_or_else(|| "physical".into()),
+        tags: view.map(|entry| entry.tags.clone()).unwrap_or_default(),
+        paired_with: view.and_then(|entry| entry.paired_with.clone()),
+        use_in_apps: view.is_some_and(|entry| entry.use_in_apps),
     }
 }
 
@@ -137,8 +160,9 @@ pub fn print_status(report: &StatusReport, json: bool) -> Result<()> {
     println!();
 
     print_managed(report);
+    print_recommended_devices(report);
+    print_devices(report);
     print_loopbacks(report);
-    print_visible_cameras(report);
     print_quarantined(report);
 
     Ok(())
@@ -290,17 +314,39 @@ fn print_loopbacks(report: &StatusReport) {
     println!();
 }
 
-fn print_visible_cameras(report: &StatusReport) {
-    if report.visible_cameras.is_empty() {
+fn print_recommended_devices(report: &StatusReport) {
+    if report.recommended_devices.is_empty() {
         return;
     }
 
-    println!("Visible capture devices");
-    for camera in &report.visible_cameras {
-        let flags = camera_flags(camera);
-        println!("  {} — {} [{flags}]", camera.path, camera.name);
-        if camera.needs_shim {
-            println!("    standardized: {}", camera.standardized_name);
+    println!("Use in apps");
+    for device in &report.recommended_devices {
+        println!(
+            "  {} — {} (instead of {})",
+            device.path, device.name, device.for_physical
+        );
+    }
+    println!();
+}
+
+fn print_devices(report: &StatusReport) {
+    if report.devices.is_empty() {
+        return;
+    }
+
+    println!("Cameras");
+    for device in &report.devices {
+        println!("  {}", format_device_line(device));
+        if let Some(paired) = &device.paired_with {
+            println!("    paired with: {paired}");
+        }
+        if device.role == crate::camera_view::DeviceRole::Physical && device.needs_shim {
+            if let Some(name) = &device.standardized_name {
+                println!("    expected virtual name: {name}");
+            }
+        }
+        for issue in &device.issues {
+            println!("    issue: {issue}");
         }
     }
     println!();
@@ -315,33 +361,23 @@ fn print_quarantined(report: &StatusReport) {
     println!();
 }
 
-fn camera_flags(camera: &CameraStatus) -> String {
-    let mut flags = Vec::new();
-    if camera.needs_shim {
-        flags.push("needs shim");
-    } else if camera.compatible {
-        flags.push("compatible");
-    }
-    if flags.is_empty() {
-        "unknown".into()
-    } else {
-        flags.join(", ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn camera_flag_labels() {
+    fn camera_status_tags() {
         let camera = CameraStatus {
             path: "/dev/video0".into(),
             name: "Test".into(),
             standardized_name: "Test - Linux Standardized".into(),
             needs_shim: true,
             compatible: false,
+            role: "physical".into(),
+            tags: vec!["physical".into(), "needs shim".into()],
+            paired_with: None,
+            use_in_apps: false,
         };
-        assert_eq!(camera_flags(&camera), "needs shim");
+        assert_eq!(camera.tags.join(", "), "physical, needs shim");
     }
 }

@@ -1,3 +1,4 @@
+pub mod camera_view;
 pub mod compat;
 pub mod devices;
 pub mod doctor;
@@ -12,6 +13,10 @@ pub mod session;
 pub mod shim;
 pub mod status;
 
+pub use camera_view::{
+    collect_scan_report, device_views_from_snapshot, format_device_line, role_label, DeviceRole,
+    DeviceView, RecommendedDevice, ScanReport,
+};
 pub use compat::{
     kernel_card_label, kernel_card_label_bytes, loopback_fps_from_intervals, standardized_label,
     CompatReport, CompatStatus, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
