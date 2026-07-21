@@ -2,7 +2,7 @@
 
 Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **Linux Standardized** camera via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
 
-> **Proof of concept (POC)** — Experimental software, not a supported product. Behavior, CLI flags, and packaging may change without notice. `serve` and `fix` require **root**, load kernel modules, write udev rules, and can **hide physical camera nodes**. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
+> **Proof of concept (POC)** — Experimental software, not a supported product. Behavior, CLI flags, and packaging may change without notice. `serve` and `fix` require **root** and load kernel modules. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
 
 ## Naming
 
@@ -21,7 +21,7 @@ Some inexpensive UVC webcams advertise frame rates like **25 fps** (common in PA
 - Linux with V4L2
 - Rust toolchain
 - [`v4l2loopback`](https://github.com/umlaeute/v4l2loopback) kernel module (for `fix` / `serve`)
-- Root for `fix`, `serve`, and `install` (loopback + udev)
+- Root for `fix`, `serve`, and `install` (loopback module)
 - Optional: `v4l2loopback-utils` (`v4l2loopback-ctl`) — not required on module ≥ 0.15 with `/dev/v4l2loopback`
 
 ## Build
@@ -66,24 +66,20 @@ cam-shim scan --json
 
 ### Run continuously (recommended)
 
-The **`serve`** command runs as a supervisor: it uses **udev hotplug** for instant camera detection, with a periodic fallback poll as a safety net.
+The **`serve`** command runs as a supervisor and polls for compatible cameras on a fixed interval.
 
 ```bash
 sudo cam-shim serve
-sudo cam-shim serve --target-fps 30 --poll-secs 30
-sudo cam-shim serve --no-hide   # keep physical camera visible
-sudo cam-shim serve --no-hotplug --poll-secs 2   # polling only
+sudo cam-shim serve --target-fps 30 --poll-secs 5
 sudo cam-shim serve --always-capture            # keep physical camera LED on when idle
 sudo cam-shim serve --max-width 1280 --max-height 720   # cap UVC negotiation
 ```
 
 The supervisor includes:
 
-- **Udev hotplug** — reacts immediately when cameras are plugged or unplugged
-- **Fallback poll** — safety reconcile every 30s if an event is missed
+- **Polling** — rescans for cameras every 30s by default (`--poll-secs` to tune)
 - **Idle pause** — physical camera LED off when no app is using the virtual camera
-
-- **Startup self-check** — repair ghost nodes, restore hidden cameras, remove orphan loopbacks
+- **Startup self-check** — repair ghost nodes and remove orphan loopbacks
 - **Worker health** — restarts shims that stop producing frames
 - **Exponential backoff** — avoids crash/restart storms after failures
 - **Circuit breaker** — quarantines a camera after 5 failures (120s default)
@@ -109,11 +105,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cam-shim
 ```
 
-When a compatible camera is plugged in, pick **`Your Camera - Linux Standardized`** in your app's camera list.
+When a compatible camera is plugged in, pick **`Your Camera - Linux Standardized`** in your app's camera list (not the raw physical device).
 
 ### Fix one camera manually
 
-Creates a virtual device, hides **all nodes** for that USB camera (e.g. `/dev/video0` and `/dev/video3`), and runs the fps shim. **Ctrl+C** removes the virtual camera and restores the physical one.
+Creates a virtual device and runs the fps shim. **Ctrl+C** removes the virtual camera.
 
 ```bash
 sudo cam-shim fix --device /dev/video2
@@ -137,7 +133,7 @@ Shows whether `serve` is running, managed cameras, loopback paths, heartbeats, a
 One-shot health check and recovery:
 
 ```bash
-sudo cam-shim doctor              # restore hidden, clean orphans, ensure module
+sudo cam-shim doctor              # repair ghost nodes, clean orphans, ensure module
 sudo cam-shim doctor --check-only # report only, no changes
 sudo cam-shim doctor --force --reload   # stop daemons, clean, reload module
 ```
@@ -150,7 +146,6 @@ Remove orphan virtual cameras created by earlier failed `fix` runs:
 sudo cam-shim clean
 sudo cam-shim clean --dry-run    # preview only
 sudo cam-shim clean --all        # remove every loopback device
-sudo cam-shim clean --udev       # also remove udev hide rules
 sudo cam-shim clean --reload     # unload/reload module (after manual /dev edits or stale ghosts)
 sudo cam-shim clean --force      # stop cam-shim/other apps holding the virtual camera, then remove
 sudo cam-shim clean --force --reload
@@ -158,12 +153,12 @@ sudo cam-shim clean --force --reload
 
 Do **not** delete `/dev/video*` files by hand — that leaves ghost sysfs entries. Use `cam-shim clean` instead.
 
-### Restore hidden cameras
+### Restore / repair device nodes
 
-If `scan` says no devices but your webcam is plugged in, it may be hidden from a previous `fix` or `serve`:
+Repair stale ghost `/dev/video*` nodes and optionally remove orphan loopbacks:
 
 ```bash
-sudo cam-shim restore                 # move cameras back from /dev/cam-shim-hidden/
+sudo cam-shim restore                 # remove ghost device nodes
 sudo cam-shim restore --loopback      # also remove leftover virtual cameras
 ```
 
@@ -186,8 +181,9 @@ sudo cam-shim install
 1. **Scan** — enumerate V4L2 devices via sysfs, query formats and frame intervals.
 2. **Compat check** — flag devices missing 30/60 fps or reporting variable frame rate.
 3. **Shim** — capture MJPEG from the physical device, duplicate/drop frames to target fps, write to v4l2loopback.
-4. **Hide** — per-camera udev rules move physical nodes to `/dev/cam-shim-hidden/` so apps prefer the standardized virtual camera.
-5. **Serve** — supervisor loop watches for plug/unplug and manages shims automatically.
+4. **Serve** — supervisor loop polls for plug/unplug and manages shims automatically.
+
+Both the physical camera and the virtual **Linux Standardized** device stay visible. Pick the standardized one in your app.
 
 Virtual cameras are created at `/dev/video10+` when possible so low numbers stay available for physical webcams. `clean` / `restore --loopback` only remove cam-shim devices — other apps' virtual cameras (OBS, etc.) are left alone unless you pass `clean --all`.
 
@@ -210,7 +206,7 @@ RUST_LOG=cam_shim::shim=debug sudo cam-shim serve
 
 ### One-shot recovery
 
-When things are in a bad state (hidden camera, orphan loopback, stale module):
+When things are in a bad state (orphan loopback, stale module, ghost nodes):
 
 ```bash
 # Close Discord, guvcview, and other apps using the virtual camera first.
@@ -221,7 +217,7 @@ sudo systemctl restart cam-shim    # if installed as a service
 Or step by step:
 
 ```bash
-sudo cam-shim restore --loopback   # remove leftover loopbacks first, then unhide
+sudo cam-shim restore --loopback   # remove leftover loopbacks first, then repair ghost nodes
 sudo cam-shim clean --force        # if loopbacks are still held open
 sudo cam-shim clean --force --reload
 sudo cam-shim serve                # or: sudo systemctl start cam-shim
@@ -231,7 +227,7 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 
 | Symptom | Likely cause | What to do |
 |--------|----------------|------------|
-| `scan` finds no cameras | Physical nodes hidden | `sudo cam-shim restore` |
+| `scan` finds no cameras | Ghost nodes or unplugged camera | `sudo cam-shim restore` |
 | Virtual cam missing in app list | Loopback not primed yet, or module not loaded | Wait ~1s after plug-in; `sudo modprobe v4l2loopback exclusive_caps=1`; check `cam-shim status` |
 | Only the physical camera shows up | `serve` not running, or camera is compatible | `cam-shim scan`; start `sudo cam-shim serve` |
 | Camera works once, fails on reopen | App left loopback open, or pause/resume bug | Close the app fully; run soak test (below); check logs for `EINVAL` |

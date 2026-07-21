@@ -1,18 +1,15 @@
-use std::path::{Path, PathBuf};
-
 use crate::error::Result;
-use crate::hide::{remove_hide_rule, repair_video_devices, teardown_hide};
+use crate::devices::repair_video_devices;
 use crate::loopback::remove_loopback_device;
 
 pub struct FixSession {
     loopback_index: u32,
     loopback_path: String,
-    udev_rule_path: Option<PathBuf>,
     cleanup_on_drop: bool,
 }
 
 impl FixSession {
-    pub fn new(loopback_path: String, udev_rule_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(loopback_path: String) -> Result<Self> {
         let loopback_index = loopback_path
             .strip_prefix("/dev/video")
             .and_then(|n| n.parse().ok())
@@ -25,7 +22,6 @@ impl FixSession {
         Ok(Self {
             loopback_index,
             loopback_path,
-            udev_rule_path,
             cleanup_on_drop: true,
         })
     }
@@ -39,24 +35,9 @@ impl FixSession {
     }
 
     pub fn cleanup(&mut self) -> Result<()> {
-        let mut loopback_err = None;
-        let mut hide_err = None;
+        let loopback_err = remove_loopback_device(self.loopback_index).err();
+        let _ = repair_video_devices();
 
-        if let Err(err) = remove_loopback_device(self.loopback_index) {
-            loopback_err = Some(err);
-        }
-
-        if let Some(rule_path) = self.udev_rule_path.take() {
-            if let Err(err) = teardown_hide(&rule_path) {
-                hide_err = Some(err);
-            }
-        } else {
-            let _ = repair_video_devices();
-        }
-
-        if let Some(err) = hide_err {
-            return Err(err);
-        }
         if let Some(err) = loopback_err {
             return Err(err);
         }
@@ -73,11 +54,6 @@ impl Drop for FixSession {
     }
 }
 
-pub fn remove_udev_hide_rule(rule_path: &Path) -> Result<()> {
-    remove_hide_rule(rule_path)
-}
-
-pub fn restore_all_hidden() -> Result<crate::hide::RestoreReport> {
-    crate::hide::remove_all_hide_rules()?;
-    crate::hide::repair_video_devices()
+pub fn repair_devices() -> Result<crate::devices::RepairReport> {
+    repair_video_devices()
 }

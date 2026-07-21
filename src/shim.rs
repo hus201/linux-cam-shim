@@ -17,7 +17,6 @@ use crate::compat::{
     DEFAULT_TARGET_FPS,
 };
 use crate::error::{CamShimError, Result};
-use crate::hide::resolve_device_path;
 use crate::loopback::loopback_has_consumers;
 use crate::loopback_output::{LoopbackOutput, OUTPUT_BUFFERS};
 
@@ -98,34 +97,20 @@ pub fn run_shim(config: ShimConfig) -> Result<()> {
         .map_err(|err| CamShimError::Io(std::io::Error::other(format!("ctrl-c handler: {err}"))))?;
     }
 
-    run_shim_until(config, running, None::<fn()>, None)
+    run_shim_until(config, running, None)
 }
 
-pub fn run_shim_until<F>(
+pub fn run_shim_until(
     config: ShimConfig,
     running: Arc<AtomicBool>,
-    on_ready: Option<F>,
     heartbeat: Option<Arc<std::sync::atomic::AtomicU64>>,
-) -> Result<()>
-where
-    F: FnOnce() + Send,
-{
+) -> Result<()> {
     running.store(true, Ordering::SeqCst);
 
     let mut target = Device::with_path(&config.target_path)
         .map_err(|_| CamShimError::DeviceNotFound(config.target_path.clone()))?;
 
-    // Open visible node, hide, then negotiate on the post-hide path so the locked
-    // loopback format survives close/reopen when capture resumes.
     let mut source = open_source_device(&config.source_path)?;
-
-    if let Some(on_ready) = on_ready {
-        on_ready();
-    }
-
-    let capture_path = resolve_device_path(&config.source_path);
-    drop(source);
-    source = open_source_device(&capture_path)?;
     let limits = CaptureLimits {
         max_width: config.max_capture_width,
         max_height: config.max_capture_height,
@@ -148,10 +133,8 @@ where
 
     let mut consumer_gate = ConsumerGate::new();
 
-    let capture_path = resolve_device_path(&config.source_path);
     tracing::info!(
         source = %config.source_path,
-        capture = %capture_path,
         target = %config.target_path,
         source_fourcc = %loopback_format.fourcc,
         target_fourcc = %loopback_format.fourcc,
@@ -206,14 +189,13 @@ fn run_capture_session(
     heartbeat: Option<&Arc<std::sync::atomic::AtomicU64>>,
     consumer_gate: &mut ConsumerGate,
 ) -> Result<()> {
-    let capture_path = resolve_device_path(&config.source_path);
     let _ = loopback_out.submit_cached();
 
-    tracing::debug!(capture = %capture_path, "physical capture resumed");
+    tracing::debug!(source = %config.source_path, "physical capture resumed");
 
     while running.load(Ordering::SeqCst) {
         if config.pause_when_idle && consumer_gate.idle_elapsed(&config.target_path) {
-            tracing::debug!(capture = %capture_path, "physical capture pausing");
+            tracing::debug!(source = %config.source_path, "physical capture pausing");
             pause_physical_capture(cap_stream);
             loopback_out.hold_last_frame()?;
             break;

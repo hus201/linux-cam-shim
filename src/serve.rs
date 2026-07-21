@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,16 +9,10 @@ use serde::Serialize;
 
 use std::collections::HashSet;
 
-use crate::hotplug::spawn_udev_monitor;
-
 use crate::compat::DEFAULT_TARGET_FPS;
 use crate::compat::{DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH};
+use crate::devices::{camera_identity, camera_serial_present, repair_video_devices};
 use crate::error::Result;
-use crate::hide::{
-    activate_hide_rules, camera_identity, camera_serial_present, hide_camera_now,
-    repair_video_devices, resolve_device_path, teardown_hide, visible_capture_path,
-    write_hide_rule_for, CameraIdentity,
-};
 use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
     create_device, ensure_module_loaded, remove_loopback_device,
@@ -41,7 +33,6 @@ const STATE_FILE: &str = "/run/cam-shim/state.json";
 pub struct ServeConfig {
     pub target_fps: u32,
     pub poll_interval: Duration,
-    pub hide_physical: bool,
     pub max_failures: u32,
     pub quarantine_duration: Duration,
     pub backoff_base: Duration,
@@ -49,7 +40,6 @@ pub struct ServeConfig {
     pub stale_frame_timeout: Duration,
     pub watchdog_timeout: Duration,
     pub write_state_file: bool,
-    pub udev_hotplug: bool,
     pub pause_when_idle: bool,
     pub max_capture_width: u32,
     pub max_capture_height: u32,
@@ -60,7 +50,6 @@ impl Default for ServeConfig {
         Self {
             target_fps: DEFAULT_TARGET_FPS,
             poll_interval: Duration::from_secs(DEFAULT_POLL_SECS),
-            hide_physical: true,
             max_failures: DEFAULT_MAX_FAILURES,
             quarantine_duration: Duration::from_secs(DEFAULT_QUARANTINE_SECS),
             backoff_base: Duration::from_millis(DEFAULT_BACKOFF_BASE_MS),
@@ -68,7 +57,6 @@ impl Default for ServeConfig {
             stale_frame_timeout: Duration::from_secs(DEFAULT_STALE_FRAME_SECS),
             watchdog_timeout: Duration::from_secs(DEFAULT_WATCHDOG_SECS),
             write_state_file: true,
-            udev_hotplug: true,
             pause_when_idle: true,
             max_capture_width: DEFAULT_MAX_CAPTURE_WIDTH,
             max_capture_height: DEFAULT_MAX_CAPTURE_HEIGHT,
@@ -86,7 +74,6 @@ struct ManagedCamera {
     source_path: String,
     loopback_index: u32,
     loopback_path: String,
-    udev_rule: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     heartbeat: Arc<AtomicU64>,
     worker: JoinHandle<()>,
@@ -200,46 +187,17 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
     tracing::info!(
         target_fps = config.target_fps,
         poll_ms = config.poll_interval.as_millis(),
-        udev_hotplug = config.udev_hotplug,
-        hide = config.hide_physical,
         max_failures = config.max_failures,
         quarantine_secs = config.quarantine_duration.as_secs(),
         stale_frame_secs = config.stale_frame_timeout.as_secs(),
         "cam-shim supervisor started"
     );
 
-    let (hotplug_tx, hotplug_rx) = mpsc::channel();
-    let udev_handle = if config.udev_hotplug {
-        match spawn_udev_monitor(shutdown.clone(), hotplug_tx) {
-            Ok(handle) => Some(handle),
-            Err(err) => {
-                tracing::warn!(%err, "udev hotplug disabled — using polling only");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut hotplug_active = udev_handle.is_some();
-
     supervisor.reconcile(&config)?;
     last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
 
     while !shutdown.load(Ordering::SeqCst) {
-        if hotplug_active {
-            match hotplug_rx.recv_timeout(config.poll_interval) {
-                Ok(()) => tracing::debug!("reconciling after udev hotplug event"),
-                Err(RecvTimeoutError::Timeout) => tracing::trace!("reconciling on fallback poll"),
-                Err(RecvTimeoutError::Disconnected) => {
-                    tracing::warn!("udev monitor stopped — continuing with fallback polling");
-                    hotplug_active = false;
-                    continue;
-                }
-            }
-        } else {
-            thread::sleep(config.poll_interval);
-        }
+        thread::sleep(config.poll_interval);
 
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -247,10 +205,6 @@ pub fn run_supervisor(config: ServeConfig) -> Result<()> {
 
         supervisor.reconcile(&config)?;
         last_reconcile_ms.store(now_unix_ms(), Ordering::Relaxed);
-    }
-
-    if let Some(handle) = udev_handle {
-        let _ = handle.join();
     }
 
     tracing::info!("cam-shim supervisor shutting down");
@@ -413,17 +367,8 @@ fn startup_self_check() -> Result<()> {
     tracing::info!("supervisor startup self-check");
 
     let repair = repair_video_devices()?;
-    if !repair.restored.is_empty() {
-        tracing::info!(restored = ?repair.restored, "restored hidden cameras");
-    }
     if !repair.ghosts_removed.is_empty() {
         tracing::info!(ghosts = ?repair.ghosts_removed, "removed ghost device nodes");
-    }
-    if !repair.stale_hidden_removed.is_empty() {
-        tracing::info!(
-            stale = ?repair.stale_hidden_removed,
-            "removed stale hidden nodes"
-        );
     }
 
     let clean = clean_loopback_devices(false, false)?;
@@ -519,17 +464,7 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
             }
         };
 
-        if let Some(existing) = by_serial.get(&identity.id_serial) {
-            if existing.source_path.contains("cam-shim-hidden") && !report.hidden {
-                by_serial.insert(
-                    identity.id_serial.clone(),
-                    ShimCandidate {
-                        serial: identity.id_serial,
-                        source_path: report.path,
-                        label: report.standardized_name,
-                    },
-                );
-            }
+        if by_serial.contains_key(&identity.id_serial) {
             continue;
         }
 
@@ -547,12 +482,11 @@ fn discover_candidates(skip_paths: &HashSet<String>) -> Result<Vec<ShimCandidate
 }
 
 fn managed_source_stale(camera: &ManagedCamera, candidate: &ShimCandidate) -> bool {
-    let managed = resolve_device_path(&camera.source_path);
-    if !std::path::Path::new(&managed).exists() {
+    if !std::path::Path::new(&camera.source_path).exists() {
         return true;
     }
 
-    let managed_name = std::path::Path::new(&managed).file_name();
+    let managed_name = std::path::Path::new(&camera.source_path).file_name();
     let candidate_name = std::path::Path::new(&candidate.source_path).file_name();
     managed_name != candidate_name
 }
@@ -570,22 +504,9 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
             )))
         })?;
 
-    let identity = camera_identity(&candidate.source_path)?;
-    let capture_path = visible_capture_path(&identity, &candidate.source_path);
-
-    let udev_rule = if config.hide_physical {
-        Some(write_hide_rule_for(&identity)?)
-    } else {
-        None
-    };
-
-    let stop = Arc::new(AtomicBool::new(true));
-    let worker_stop = stop.clone();
-    let heartbeat = Arc::new(AtomicU64::new(now_unix_ms()));
-    let worker_heartbeat = heartbeat.clone();
-    let source_path = capture_path.clone();
+    let source_path = candidate.source_path.clone();
     let shim_config = ShimConfig {
-        source_path: capture_path,
+        source_path: source_path.clone(),
         target_path: loopback.path.clone(),
         target_fps: config.target_fps,
         pause_when_idle: config.pause_when_idle,
@@ -593,16 +514,13 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
         max_capture_height: config.max_capture_height,
     };
 
-    let hide_identity = if config.hide_physical {
-        Some(identity)
-    } else {
-        None
-    };
+    let stop = Arc::new(AtomicBool::new(true));
+    let worker_stop = stop.clone();
+    let heartbeat = Arc::new(AtomicU64::new(now_unix_ms()));
+    let worker_heartbeat = heartbeat.clone();
 
     let worker = thread::spawn(move || {
-        let on_ready = hide_identity.map(|identity| move || hide_physical_camera(&identity));
-
-        if let Err(err) = run_shim_until(shim_config, worker_stop, on_ready, Some(worker_heartbeat))
+        if let Err(err) = run_shim_until(shim_config, worker_stop, Some(worker_heartbeat))
         {
             tracing::error!(%err, "shim worker exited with error");
         }
@@ -612,27 +530,10 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
         source_path,
         loopback_index,
         loopback_path: loopback.path,
-        udev_rule,
         stop,
         heartbeat,
         worker,
     })
-}
-
-fn hide_physical_camera(identity: &CameraIdentity) {
-    activate_hide_rules();
-    match hide_camera_now(identity) {
-        Ok(hidden) => tracing::info!(
-            serial = %identity.id_serial,
-            hidden = ?hidden,
-            "physical camera hidden"
-        ),
-        Err(err) => tracing::warn!(
-            serial = %identity.id_serial,
-            %err,
-            "failed to hide physical camera after capture started"
-        ),
-    }
 }
 
 fn stop_managed(camera: ManagedCamera) {
@@ -647,13 +548,7 @@ fn stop_managed(camera: ManagedCamera) {
         );
     }
 
-    if let Some(rule_path) = camera.udev_rule {
-        if let Err(err) = teardown_hide(&rule_path) {
-            tracing::warn!(path = %rule_path.display(), %err, "failed to restore hidden camera");
-        }
-    } else {
-        let _ = repair_video_devices();
-    }
+    let _ = repair_video_devices();
 }
 
 fn heartbeat_age(last_ms: u64) -> Duration {

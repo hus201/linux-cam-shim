@@ -18,7 +18,7 @@ copyright = "2026, cam-shim contributors"
 license-file = ["LICENSE", "4"]
 section = "video"
 priority = "optional"
-depends = "$auto, kmod, udev"
+depends = "$auto, kmod"
 recommends = "v4l-utils, systemd"
 suggests = "v4l2loopback-dkms | v4l2loopback-modules-dkms | v4l2loopback-modules, v4l2loopback-utils, psmisc"
 extended-description = """\
@@ -46,7 +46,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = "3.4"
 v4l = "0.14"
 libc = "0.2"
-udev = "0.9"
 
 [profile.release]
 lto = true

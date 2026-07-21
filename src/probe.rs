@@ -8,8 +8,8 @@ use v4l::prelude::*;
 use v4l::video::Capture;
 
 use crate::compat::{standardized_label, CompatReport, CompatStatus};
+use crate::devices::physical_camera_key_with_name;
 use crate::error::{CamShimError, Result};
-use crate::hide::device_id_serial;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeDepth {
@@ -30,7 +30,6 @@ pub struct DeviceReport {
     pub standardized_name: String,
     pub compatible: bool,
     pub needs_shim: bool,
-    pub hidden: bool,
     pub advertised_fps: Vec<String>,
     pub issues: Vec<String>,
 }
@@ -119,7 +118,6 @@ fn probe_device(path: &Path, depth: ProbeDepth) -> Result<DeviceReport> {
         standardized_name: standardized_label(&name),
         compatible: compat.status == CompatStatus::Compatible,
         needs_shim: compat.status == CompatStatus::NeedsShim,
-        hidden: path.starts_with("/dev/cam-shim-hidden/"),
         advertised_fps: compat
             .advertised_fps
             .iter()
@@ -144,7 +142,6 @@ fn probe_device_sysfs(path: &Path, note: Option<&str>) -> Result<DeviceReport> {
             )))
         })?;
 
-    let hidden = path.starts_with("/dev/cam-shim-hidden/");
     let standardized = is_standardized_device_name(&name);
     let mut issues = Vec::new();
     if let Some(note) = note {
@@ -161,7 +158,6 @@ fn probe_device_sysfs(path: &Path, note: Option<&str>) -> Result<DeviceReport> {
         standardized_name: standardized_label(&name),
         compatible: standardized,
         needs_shim: !standardized,
-        hidden,
         advertised_fps: Vec::new(),
         issues,
     })
@@ -224,11 +220,6 @@ fn resolve_device_node(video_name: &str) -> Option<PathBuf> {
         return Some(normal);
     }
 
-    let hidden = Path::new("/dev/cam-shim-hidden").join(video_name);
-    if hidden.exists() {
-        return Some(hidden);
-    }
-
     None
 }
 
@@ -244,7 +235,7 @@ fn dedupe_by_physical_camera(reports: Vec<DeviceReport>) -> Vec<DeviceReport> {
     let mut best: HashMap<String, DeviceReport> = HashMap::new();
 
     for report in reports {
-        let key = physical_camera_key(&report.path, &report.name);
+        let key = physical_camera_key_with_name(&report.path, &report.name);
         let report_rank = node_rank(&report);
 
         best.entry(key)
@@ -259,55 +250,6 @@ fn dedupe_by_physical_camera(reports: Vec<DeviceReport>) -> Vec<DeviceReport> {
     let mut out: Vec<_> = best.into_values().collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
-}
-
-fn physical_camera_key(device_path: &str, card_name: &str) -> String {
-    if let Some(key) = usb_device_sysfs_key(device_path) {
-        return key;
-    }
-    if let Some(serial) = device_id_serial(device_path) {
-        return format!("serial:{serial}");
-    }
-    if !card_name.is_empty() {
-        return format!("name:{card_name}");
-    }
-    device_path.to_string()
-}
-
-/// Walk from `video4linux/videoN/device` up to the USB device directory.
-fn usb_device_sysfs_key(device_path: &str) -> Option<String> {
-    let video_name = Path::new(device_path).file_name()?.to_string_lossy();
-    let device_symlink = Path::new("/sys/class/video4linux")
-        .join(&*video_name)
-        .join("device");
-    let mut path = fs::canonicalize(device_symlink).ok()?;
-
-    loop {
-        if path.join("idVendor").is_file() {
-            let vendor = fs::read_to_string(path.join("idVendor"))
-                .ok()?
-                .trim()
-                .to_string();
-            let product = fs::read_to_string(path.join("idProduct"))
-                .ok()?
-                .trim()
-                .to_string();
-            let serial = fs::read_to_string(path.join("serial"))
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "no-serial".into());
-            return Some(format!("usb:{vendor}:{product}:{serial}"));
-        }
-
-        let parent = path.parent()?.to_path_buf();
-        if parent == path {
-            break;
-        }
-        path = parent;
-    }
-
-    None
 }
 
 /// Prefer capture nodes over metadata; then lowest `/dev/videoN` index.
@@ -339,7 +281,6 @@ mod tests {
             standardized_name: String::new(),
             compatible: false,
             needs_shim: true,
-            hidden: false,
             advertised_fps: Vec::new(),
             issues: Vec::new(),
         };
@@ -362,7 +303,6 @@ mod tests {
                 standardized_name: "Cam".into(),
                 compatible: false,
                 needs_shim: true,
-                hidden: false,
                 advertised_fps: Vec::new(),
                 issues: Vec::new(),
             },
@@ -374,7 +314,6 @@ mod tests {
                 standardized_name: "Cam".into(),
                 compatible: false,
                 needs_shim: true,
-                hidden: false,
                 advertised_fps: Vec::new(),
                 issues: Vec::new(),
             },

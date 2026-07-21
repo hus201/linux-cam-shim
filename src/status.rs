@@ -17,7 +17,6 @@ pub struct StatusReport {
     pub state_file: &'static str,
     pub state_present: bool,
     pub state_age_ms: Option<u64>,
-    pub hidden_cameras: usize,
     pub ghost_nodes: usize,
     pub visible_capture_devices: usize,
     pub needs_shim_devices: usize,
@@ -52,7 +51,6 @@ pub struct CameraStatus {
     pub name: String,
     pub standardized_name: String,
     pub needs_shim: bool,
-    pub hidden: bool,
     pub compatible: bool,
 }
 
@@ -75,7 +73,6 @@ pub fn collect_status() -> Result<StatusReport> {
         state_file: STATE_FILE,
         state_present: snapshot.supervisor_state.is_some(),
         state_age_ms,
-        hidden_cameras: snapshot.hidden_cameras,
         ghost_nodes: snapshot.ghost_nodes,
         visible_capture_devices: snapshot.visible_capture_devices,
         needs_shim_devices: snapshot.needs_shim_devices,
@@ -96,7 +93,6 @@ fn device_report_to_status(device: &DeviceReport) -> CameraStatus {
         name: device.name.clone(),
         standardized_name: device.standardized_name.clone(),
         needs_shim: device.needs_shim,
-        hidden: device.hidden,
         compatible: device.compatible,
     }
 }
@@ -133,10 +129,9 @@ pub fn print_status(report: &StatusReport, json: bool) -> Result<()> {
     );
     print_state_file(report);
     println!(
-        "Cameras:  {} visible, {} need shim, {} hidden, {} ghost node(s)",
+        "Cameras:  {} visible, {} need shim, {} ghost node(s)",
         report.visible_capture_devices,
         report.needs_shim_devices,
-        report.hidden_cameras,
         report.ghost_nodes
     );
     println!();
@@ -322,9 +317,6 @@ fn print_quarantined(report: &StatusReport) {
 
 fn camera_flags(camera: &CameraStatus) -> String {
     let mut flags = Vec::new();
-    if camera.hidden {
-        flags.push("hidden");
-    }
     if camera.needs_shim {
         flags.push("needs shim");
     } else if camera.compatible {
@@ -348,7 +340,6 @@ mod tests {
             name: "Test".into(),
             standardized_name: "Test - Linux Standardized".into(),
             needs_shim: true,
-            hidden: false,
             compatible: false,
         };
         assert_eq!(camera_flags(&camera), "needs shim");

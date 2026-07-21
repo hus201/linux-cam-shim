@@ -167,7 +167,7 @@ fn create_with_ctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
 }
 
 /// Prefer `/dev/video10+` so physical UVC devices keep low numbers when they
-/// reappear after unhide/replug. Does not remove or rename other apps' devices.
+/// reappear after replug. Does not remove or rename other apps' devices.
 const PREFERRED_LOOPBACK_NR_START: i32 = 10;
 const PREFERRED_LOOPBACK_NR_END: i32 = 63;
 
@@ -777,7 +777,7 @@ fn video_device_path_key(link: &Path) -> Option<String> {
     let link = link.to_string_lossy();
     let link = link.strip_suffix(" (deleted)").unwrap_or(&link);
 
-    if link.starts_with("/dev/video") || link.contains("/cam-shim-hidden/video") {
+    if link.starts_with("/dev/video") {
         Some(link.to_string())
     } else {
         None

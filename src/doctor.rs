@@ -10,7 +10,7 @@ use crate::runtime::{
     age_ms_since, collect_runtime_snapshot, heartbeat_age_secs, heartbeat_is_stale,
     RuntimeSnapshot, HEARTBEAT_STALE_SECS, STATE_FILE,
 };
-use crate::session::restore_all_hidden;
+use crate::session::repair_devices;
 
 #[derive(Debug, Clone)]
 pub struct DoctorConfig {
@@ -34,9 +34,7 @@ pub struct DoctorReport {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DoctorActions {
     pub stopped_daemons: bool,
-    pub restored_hidden: Vec<String>,
     pub ghosts_removed: Vec<String>,
-    pub stale_hidden_removed: Vec<String>,
     pub loopbacks_removed: Vec<String>,
     pub loopback_failures: Vec<String>,
     pub module_loaded: bool,
@@ -55,10 +53,8 @@ pub fn run_doctor(config: DoctorConfig) -> Result<DoctorReport> {
             actions.stopped_daemons = true;
         }
 
-        let repair = restore_all_hidden()?;
-        actions.restored_hidden = repair.restored;
+        let repair = repair_devices()?;
         actions.ghosts_removed = repair.ghosts_removed;
-        actions.stale_hidden_removed = repair.stale_hidden_removed;
 
         let clean = clean_loopback_devices(false, config.force)?;
         actions.loopbacks_removed = clean.removed;
@@ -179,9 +175,7 @@ pub fn print_doctor_report(report: &DoctorReport, json: bool) -> Result<()> {
 impl DoctorActions {
     fn is_empty(&self) -> bool {
         !self.stopped_daemons
-            && self.restored_hidden.is_empty()
             && self.ghosts_removed.is_empty()
-            && self.stale_hidden_removed.is_empty()
             && self.loopbacks_removed.is_empty()
             && self.loopback_failures.is_empty()
             && !self.module_loaded
@@ -195,22 +189,13 @@ fn diagnose(snapshot: &RuntimeSnapshot) -> Vec<String> {
     if !snapshot.loopback_module_loaded {
         issues.push("v4l2loopback kernel module is not loaded".into());
     }
-    if snapshot.hidden_cameras > 0 {
-        issues.push(format!(
-            "{} camera node(s) still hidden under /dev/cam-shim-hidden/",
-            snapshot.hidden_cameras
-        ));
-    }
     if snapshot.ghost_nodes > 0 {
         issues.push(format!(
             "{} stale /dev/video* ghost node(s) remain",
             snapshot.ghost_nodes
         ));
     }
-    if snapshot.visible_capture_devices == 0
-        && snapshot.hidden_cameras == 0
-        && snapshot.ghost_nodes == 0
-    {
+    if snapshot.visible_capture_devices == 0 && snapshot.ghost_nodes == 0 {
         issues.push("no visible V4L2 capture devices found".into());
     }
 
@@ -259,9 +244,6 @@ fn diagnose(snapshot: &RuntimeSnapshot) -> Vec<String> {
 fn build_recommendations(snapshot: &RuntimeSnapshot, issues: &[String]) -> Vec<String> {
     let mut out = Vec::new();
 
-    if snapshot.hidden_cameras > 0 {
-        out.push("Run: sudo cam-shim restore".into());
-    }
     if snapshot.ghost_nodes > 0 {
         out.push("Run: sudo cam-shim restore (repairs ghost nodes)".into());
     }
@@ -315,7 +297,6 @@ fn print_snapshot(title: &str, snapshot: &RuntimeSnapshot) {
         snapshot.visible_capture_devices
     );
     println!("  needs shim: {}", snapshot.needs_shim_devices);
-    println!("  hidden cameras: {}", snapshot.hidden_cameras);
     println!("  ghost nodes: {}", snapshot.ghost_nodes);
 
     if snapshot.loopbacks.is_empty() {
@@ -373,19 +354,10 @@ fn print_actions(actions: &DoctorActions) {
     if actions.stopped_daemons {
         println!("  stopped cam-shim serve/fix/relay processes");
     }
-    if !actions.restored_hidden.is_empty() {
-        println!("  restored: {}", actions.restored_hidden.join(", "));
-    }
     if !actions.ghosts_removed.is_empty() {
         println!(
             "  removed ghost nodes: {}",
             actions.ghosts_removed.join(", ")
-        );
-    }
-    if !actions.stale_hidden_removed.is_empty() {
-        println!(
-            "  removed stale hidden nodes: {}",
-            actions.stale_hidden_removed.join(", ")
         );
     }
     if !actions.loopbacks_removed.is_empty() {

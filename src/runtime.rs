@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::hide::{ghost_device_count, hidden_camera_count};
+use crate::devices::ghost_device_count;
 use crate::loopback::{build_video_device_holder_map, is_cam_shim_loopback, list_loopback_devices};
 use crate::probe::{scan_devices_sysfs, DeviceReport};
 
@@ -15,7 +15,6 @@ pub const HEARTBEAT_STALE_SECS: u64 = 30;
 pub struct RuntimeSnapshot {
     pub loopback_module_loaded: bool,
     pub serve_running: bool,
-    pub hidden_cameras: usize,
     pub ghost_nodes: usize,
     pub visible_capture_devices: usize,
     pub needs_shim_devices: usize,
@@ -86,7 +85,6 @@ pub fn collect_runtime_snapshot() -> Result<RuntimeSnapshot> {
     Ok(RuntimeSnapshot {
         loopback_module_loaded: fs::metadata("/sys/module/v4l2loopback").is_ok(),
         serve_running: cam_shim_serve_running(),
-        hidden_cameras: hidden_camera_count().unwrap_or(0),
         ghost_nodes: ghost_device_count().unwrap_or(0),
         visible_capture_devices,
         needs_shim_devices,
