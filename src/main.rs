@@ -3,12 +3,13 @@ use tracing_subscriber::EnvFilter;
 
 use cam_shim::unload_loopback_module;
 use cam_shim::{
-    clean_loopback_devices, collect_status, create_device, default_shim_config,
+    clean_loopback_devices, collect_status, create_device_with_options, default_shim_config,
     ensure_module_loaded, format_device_line, format_holder_list, ghost_device_count,
-    list_device_holders, list_loopback_devices, print_doctor_report, print_status,
-    probe_device_path, repair_devices, run_doctor, run_shim, run_supervisor,
-    collect_scan_report, standardized_label, stop_cam_shim_processes, DoctorConfig, FixSession,
-    ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH, DEFAULT_TARGET_FPS,
+    list_device_holders, list_loopback_devices, physical_camera_key, print_doctor_report,
+    print_status, probe_device_path, repair_devices, run_doctor, run_shim, run_supervisor,
+    collect_scan_report, standardized_label, stop_cam_shim_processes, CreateDeviceOptions,
+    DoctorConfig, FixSession, ServeConfig, DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH,
+    DEFAULT_TARGET_FPS,
 };
 
 #[derive(Parser)]
@@ -336,7 +337,11 @@ fn cmd_fix(device: &str, target_fps: u32, no_cleanup: bool) -> anyhow::Result<()
     let label = standardized_label(&report.name);
     println!("Creating virtual camera: {label}");
 
-    let loopback = create_device(&label, target_fps)?;
+    let loopback = create_device_with_options(
+        &label,
+        target_fps,
+        CreateDeviceOptions::for_camera(physical_camera_key(device)),
+    )?;
     println!("Virtual camera ready at {}", loopback.path);
 
     let mut session = FixSession::new(loopback.path.clone())?;

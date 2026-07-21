@@ -18,7 +18,7 @@ use crate::devices::{camera_identity, camera_serial_present, repair_video_device
 use crate::error::Result;
 use crate::loopback::{
     build_video_device_holder_map, cam_shim_held_device_paths, clean_loopback_devices,
-    create_device, ensure_module_loaded, remove_loopback_device,
+    create_device_with_options, ensure_module_loaded, remove_loopback_device, CreateDeviceOptions,
 };
 use crate::probe::{scan_devices_with_options, ProbeDepth};
 use crate::shim::{run_shim_until, ShimConfig};
@@ -527,7 +527,11 @@ fn managed_source_stale(camera: &ManagedCamera, candidate: &ShimCandidate) -> bo
 }
 
 fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<ManagedCamera> {
-    let loopback = create_device(&candidate.label, config.target_fps)?;
+    let loopback = create_device_with_options(
+        &candidate.label,
+        config.target_fps,
+        CreateDeviceOptions::for_camera(&candidate.serial),
+    )?;
     let loopback_index = loopback
         .path
         .strip_prefix("/dev/video")
@@ -538,6 +542,14 @@ fn start_managed(candidate: &ShimCandidate, config: &ServeConfig) -> Result<Mana
                 loopback.path
             )))
         })?;
+
+    tracing::info!(
+        serial = %candidate.serial,
+        source = %candidate.source_path,
+        loopback = %loopback.path,
+        label = %candidate.label,
+        "shim started"
+    );
 
     let source_path = candidate.source_path.clone();
     let shim_config = ShimConfig {

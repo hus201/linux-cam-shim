@@ -11,6 +11,7 @@ use std::time::Duration;
 use libc::{c_ulong, ioctl, kill, open, O_RDWR, SIGTERM};
 
 use crate::compat::{kernel_card_label, kernel_card_label_bytes};
+use crate::device_registry::{assign_loopback_index, lookup_loopback_index};
 use crate::error::{CamShimError, Result};
 
 const V4L2LOOPBACK_CTL_ADD: c_ulong = ioctl_iow::<V4l2LoopbackConfig>(b'~', 1);
@@ -94,27 +95,55 @@ pub fn ensure_module_loaded() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CreateDeviceOptions {
+    /// Stable camera identity (USB serial / physical key from `devices`).
+    pub camera_key: Option<String>,
+}
+
+impl CreateDeviceOptions {
+    pub fn for_camera(camera_key: impl Into<String>) -> Self {
+        Self {
+            camera_key: Some(camera_key.into()),
+        }
+    }
+}
+
 pub fn create_device(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
+    create_device_with_options(label, target_fps, CreateDeviceOptions::default())
+}
+
+pub fn create_device_with_options(
+    label: &str,
+    target_fps: u32,
+    options: CreateDeviceOptions,
+) -> Result<LoopbackDevice> {
     ensure_module_loaded()?;
 
+    if let Some(path) = find_loopback_by_label(label) {
+        apply_target_fps(&path, target_fps);
+        let device = LoopbackDevice {
+            path,
+            label: label.to_string(),
+        };
+        register_device_assignment(&options, &device);
+        return Ok(device);
+    }
+
+    let preferred_nr = resolve_loopback_output_nr(options.camera_key.as_deref());
+
     if fs::metadata("/dev/v4l2loopback").is_ok() {
-        if let Ok(device) = create_with_ioctl(label, target_fps) {
+        if let Ok(device) = create_with_ioctl(label, target_fps, preferred_nr) {
+            register_device_assignment(&options, &device);
             return Ok(device);
         }
     }
 
     if ctl_supports_create() {
         if let Ok(device) = create_with_ctl(label, target_fps) {
+            register_device_assignment(&options, &device);
             return Ok(device);
         }
-    }
-
-    if let Some(path) = find_loopback_by_label(label) {
-        apply_target_fps(&path, target_fps);
-        return Ok(LoopbackDevice {
-            path,
-            label: label.to_string(),
-        });
     }
 
     if fs::metadata("/sys/module/v4l2loopback").is_ok() {
@@ -125,7 +154,38 @@ pub fn create_device(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
         )));
     }
 
-    create_with_modprobe(label, target_fps)
+    let device = create_with_modprobe(label, target_fps)?;
+    register_device_assignment(&options, &device);
+    Ok(device)
+}
+
+fn register_device_assignment(options: &CreateDeviceOptions, device: &LoopbackDevice) {
+    let Some(camera_key) = options.camera_key.as_deref() else {
+        return;
+    };
+
+    let Some(index) = video_index_from_path(&device.path) else {
+        return;
+    };
+
+    let previous = lookup_loopback_index(camera_key);
+    if let Err(err) = assign_loopback_index(camera_key, index, &device.label) {
+        tracing::warn!(%err, camera_key, index, "failed to persist loopback index");
+        return;
+    }
+
+    if previous != Some(index) {
+        tracing::info!(
+            camera_key,
+            index,
+            path = %device.path,
+            "assigned stable loopback index"
+        );
+    }
+}
+
+fn video_index_from_path(path: &str) -> Option<u32> {
+    path.strip_prefix("/dev/video")?.parse().ok()
 }
 
 fn create_with_ctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
@@ -171,6 +231,32 @@ fn create_with_ctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
 const PREFERRED_LOOPBACK_NR_START: i32 = 10;
 const PREFERRED_LOOPBACK_NR_END: i32 = 63;
 
+fn video_slot_free(nr: i32) -> bool {
+    if !(PREFERRED_LOOPBACK_NR_START..=PREFERRED_LOOPBACK_NR_END).contains(&nr) {
+        return false;
+    }
+    fs::metadata(format!("/sys/class/video4linux/video{nr}")).is_err()
+}
+
+fn resolve_loopback_output_nr(camera_key: Option<&str>) -> i32 {
+    if let Some(key) = camera_key {
+        if let Some(index) = lookup_loopback_index(key) {
+            let nr = index as i32;
+            if video_slot_free(nr) {
+                return nr;
+            }
+            tracing::debug!(
+                camera_key = key,
+                index = nr,
+                "registered loopback index is busy — will retry or fall back"
+            );
+            return nr;
+        }
+    }
+
+    preferred_loopback_output_nr()
+}
+
 fn preferred_loopback_output_nr() -> i32 {
     for nr in PREFERRED_LOOPBACK_NR_START..=PREFERRED_LOOPBACK_NR_END {
         let sysfs = format!("/sys/class/video4linux/video{nr}");
@@ -181,7 +267,7 @@ fn preferred_loopback_output_nr() -> i32 {
     -1
 }
 
-fn create_with_ioctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
+fn create_with_ioctl(label: &str, target_fps: u32, output_nr: i32) -> Result<LoopbackDevice> {
     let path = CString::new("/dev/v4l2loopback").map_err(|_| {
         CamShimError::Io(io::Error::other("invalid v4l2loopback control device path"))
     })?;
@@ -195,7 +281,7 @@ fn create_with_ioctl(label: &str, target_fps: u32) -> Result<LoopbackDevice> {
     }
 
     let mut config = V4l2LoopbackConfig {
-        output_nr: preferred_loopback_output_nr(),
+        output_nr,
         unused: -1,
         card_label: kernel_card_label_bytes(label),
         min_width: 0,
@@ -1034,6 +1120,11 @@ mod tests {
     fn prefers_high_loopback_numbers() {
         let nr = preferred_loopback_output_nr();
         assert!(nr == -1 || nr >= PREFERRED_LOOPBACK_NR_START);
+    }
+
+    #[test]
+    fn resolve_without_camera_key_uses_first_free_slot() {
+        assert_eq!(resolve_loopback_output_nr(None), preferred_loopback_output_nr());
     }
 
     #[test]
