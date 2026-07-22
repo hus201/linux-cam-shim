@@ -147,7 +147,7 @@ mod tests {
             "serial:ABC".into(),
             LoopbackAssignment {
                 loopback_index: 10,
-                label: "Cam - Linux Standardized".into(),
+                label: "Cam - Shim".into(),
             },
         );
 

@@ -1,8 +1,8 @@
 # linux-cam-shim
 
-Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **Linux Standardized** camera via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
+Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **`{camera} - Shim`** device via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
 
-> **Early stage (v0.3)** — Core relay, hotplug, scan/status UX, stable loopback indices, paced output, and YUYV/uncompressed capture are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
+> **Early stage (v0.3)** — Core relay, hotplug, scan/status UX, stable loopback indices, and YUYV/uncompressed capture are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
 
 ## Naming
 
@@ -10,7 +10,7 @@ Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-sta
 |-------|------|
 | Project / repo | `linux-cam-shim` |
 | CLI binary | `cam-shim` |
-| Virtual device label | `{Original Name} - Linux Standardized` |
+| Virtual device label | `{Original Name} - Shim` |
 
 ## Problem
 
@@ -71,9 +71,9 @@ Example human output:
 ```text
 /dev/video0  Fantech C30  [physical, needs shim]
   paired with: /dev/video10
-  expected virtual name: Fantech C30 - Linux Standardized
+  expected virtual name: Fantech C30 - Shim
 
-/dev/video10  Fantech C30 - Linux Std  [virtual, use this]
+/dev/video10  Fantech C30 - Shim  [virtual, use this]
   paired with: /dev/video0
 ```
 
@@ -96,7 +96,7 @@ The supervisor includes:
 - **Hotplug settle** — retries discovery for up to 2s after plug-in while sysfs/V4L2 comes up
 - **Fallback poll** — safety reconcile every 5s by default if an event is missed (`--poll-secs` to tune)
 - **Always capture** — physical camera stays open while a shim worker is running
-- **Paced output** — steady `target_fps` to the virtual device (dup/drop as needed)
+- **Direct relay** — capture frames forwarded to the loopback at the camera's native rate; loopback fps metadata set to `target_fps`
 - **Stable loopback index** — same USB camera keeps the same `/dev/video10+` across replug and reboot (`/var/lib/cam-shim/devices.json`)
 - **Startup self-check** — repair ghost nodes and remove orphan loopbacks
 - **Worker health** — restarts shims that stop producing frames
@@ -124,7 +124,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cam-shim
 ```
 
-When a compatible camera is plugged in, pick **`Your Camera - Linux Standardized`** in your app's camera list (not the raw physical device).
+When a compatible camera is plugged in, pick **`Your Camera - Shim`** in your app's camera list (not the raw physical device).
 
 ### Fix one camera manually
 
@@ -199,10 +199,10 @@ sudo cam-shim install
 
 1. **Scan** — enumerate physical and virtual V4L2 devices; flag compat issues; pair physical cameras with their standardized loopback.
 2. **Compat check** — flag devices missing 30/60 fps or reporting variable frame rate.
-3. **Shim** — capture MJPEG or uncompressed YUV (YUYV, NV12, …) from the physical device at native rate; pace output at `target_fps` (dup/drop); write to v4l2loopback with matching fps metadata.
+3. **Shim** — capture MJPEG or uncompressed YUV (YUYV, NV12, …) from the physical device at native rate; relay frames to v4l2loopback mmap output with `target_fps` metadata on the virtual device.
 4. **Serve** — supervisor reacts to hotplug (with settle retry) and manages shims automatically.
 
-Both the physical camera and the virtual **Linux Standardized** device stay visible. Pick the standardized one in your app.
+Both the physical camera and the virtual **Shim** device stay visible. Pick the Shim device in your app.
 
 Virtual cameras are created at `/dev/video10+` when possible so low numbers stay available for physical webcams. The same camera gets the same loopback index every time via `/var/lib/cam-shim/devices.json`. `clean` / `restore --loopback` only remove cam-shim devices — other apps' virtual cameras (OBS, etc.) are left alone unless you pass `clean --all`.
 
@@ -261,7 +261,7 @@ sudo cam-shim serve                # or: sudo systemctl start cam-shim
 
 ### App notes
 
-- **Discord / Chrome / Firefox** — pick **`Your Camera - Linux Standardized`**, not the raw physical device. The first open after plug-in may take about a second while the loopback producer attaches.
+- **Discord / Chrome / Firefox** — pick **`Your Camera - Shim`**, not the raw physical device. The first open after plug-in may take about a second while the loopback producer attaches.
 - **guvcview** — close it before `cam-shim clean`; it often keeps loopback nodes open after the window closes.
 - **Close apps before cleanup** — `clean --force` can terminate holders, but graceful close avoids stale buffers and EINVAL on the next open.
 
@@ -280,22 +280,24 @@ sudo ./scripts/soak.sh --start-serve --iterations 100
 
 The script repeatedly opens and closes the virtual camera to catch EINVAL or worker crashes on reopen.
 
+See [docs/tested-on.md](docs/tested-on.md) for hardware validation reports.
+
 ## Project status
 
-**Early stage (v0.3)** — working toward a reliable “plug in → run serve → pick Linux Standardized” flow. Not ready to call stable yet; run the soak test on your hardware before trusting it daily.
+**Early stage (v0.3)** — working toward a reliable “plug in → run serve → pick `{camera} - Shim`” flow. Not ready to call stable yet; run the soak test on your hardware before trusting it daily.
 
 ### v0.3 highlights
 
 - Scan/status UX — physical vs virtual pairing, `recommended_devices`
 - Stable loopback index — `/var/lib/cam-shim/devices.json` (survives reboot)
-- Paced output + loopback fps metadata aligned to `target_fps`
+- Direct capture→loopback relay + loopback fps metadata at `target_fps`
 - Netlink hotplug with 2s settle retry
 - YUYV / NV12 / uncompressed relay when MJPEG is unavailable
 
 | Area | Status |
 |------|--------|
 | UVC scan + compat detection | Done |
-| MJPEG + YUYV/uncompressed relay + paced output | Done |
+| MJPEG + YUYV/uncompressed relay | Done |
 | Netlink hotplug + settle retry + fallback poll | Done |
 | Scan/status UX (physical vs virtual, recommendations) | Done |
 | Stable loopback index (`/var/lib/cam-shim/devices.json`) | Done |

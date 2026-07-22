@@ -243,7 +243,7 @@ fn should_react_to_uevent(event: &Uevent) -> bool {
     }
 
     if let Some(name) = event.name.as_deref() {
-        if name.contains("Linux Std") || name.contains("Linux Standardized") {
+        if crate::compat::is_shim_device_name(name) {
             return false;
         }
     }
@@ -269,7 +269,7 @@ mod tests {
     fn ignores_virtual_loopback_hotplug() {
         assert!(!should_react_to_uevent(&sample_event(
             "/devices/virtual/video4linux/video4",
-            Some("Fantech Luminous C3 - Linux Std")
+            Some("Fantech Luminous C30 - Shim")
         )));
     }
 
@@ -285,7 +285,7 @@ mod tests {
     fn ignores_standardized_name_on_physical_path() {
         assert!(!should_react_to_uevent(&sample_event(
             "/devices/pci0000:00/usb1/1-8/video4linux/video0",
-            Some("webcam: Foo - Linux Standardized")
+            Some("webcam: Foo - Shim")
         )));
     }
 

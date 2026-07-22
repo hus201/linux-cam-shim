@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::compat::{kernel_card_label, standardized_label};
+use crate::compat::{kernel_card_label, standardized_label, SHIM_SUFFIX};
 use crate::devices::physical_camera_key_with_name;
 use crate::error::Result;
 use crate::loopback::{is_cam_shim_loopback, list_loopback_devices, LoopbackDeviceInfo};
@@ -275,7 +275,7 @@ pub fn virtual_matches_physical(physical_name: &str, virtual_name: &str) -> bool
         return true;
     }
 
-    for suffix in [" - Linux Standardized", " - Linux Std"] {
+    for suffix in [SHIM_SUFFIX, " - Linux Standardized", " - Linux Std"] {
         if let Some(base) = virt.strip_suffix(suffix) {
             if base == phys || phys.starts_with(base) || base.starts_with(&phys) {
                 return true;
@@ -349,6 +349,10 @@ mod tests {
     fn virtual_name_matching_handles_kernel_truncation() {
         assert!(virtual_matches_physical(
             "Fantech Luminous C30",
+            "Fantech Luminous C30 - Shim"
+        ));
+        assert!(virtual_matches_physical(
+            "Fantech Luminous C30",
             "Fantech Luminous C30 - Linux Std"
         ));
         assert!(virtual_matches_physical(
@@ -370,7 +374,7 @@ mod tests {
         )];
         let loopbacks = vec![sample_loopback(
             "/dev/video10",
-            "Fantech Luminous C30 - Linux Std",
+            "Fantech Luminous C30 - Shim",
         )];
 
         let report = build_device_views(&physical, &loopbacks, true, None);
@@ -401,7 +405,7 @@ mod tests {
     #[test]
     fn recommended_devices_empty_when_serve_not_running() {
         let physical = vec![sample_physical("/dev/video0", "Cam", true)];
-        let loopbacks = vec![sample_loopback("/dev/video10", "Cam - Linux Std")];
+        let loopbacks = vec![sample_loopback("/dev/video10", "Cam - Shim")];
 
         let report = build_device_views(&physical, &loopbacks, false, None);
         assert!(report.recommended_devices.is_empty());

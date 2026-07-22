@@ -164,7 +164,7 @@ fn probe_device_sysfs(path: &Path, note: Option<&str>) -> Result<DeviceReport> {
 }
 
 fn is_standardized_device_name(name: &str) -> bool {
-    name.contains("Linux Standardized")
+    crate::compat::is_shim_device_name(name)
 }
 
 fn collect_current_intervals(dev: &Device) -> Result<Vec<FrameInterval>> {
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn standardized_name_detection() {
         assert!(is_standardized_device_name(
-            "webcam: Fantech Luminous C30 - Linux Standardized"
+            "webcam: Fantech Luminous C30 - Shim"
         ));
         assert!(!is_standardized_device_name("webcam: Fantech Luminous C30"));
     }

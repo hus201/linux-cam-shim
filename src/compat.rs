@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use v4l::fraction::Fraction;
 use v4l::frameinterval::{FrameInterval, FrameIntervalEnum};
 
-pub const STANDARDIZED_SUFFIX: &str = " - Linux Standardized";
+pub const SHIM_SUFFIX: &str = " - Shim";
+/// Deprecated alias — use [`SHIM_SUFFIX`].
+pub const STANDARDIZED_SUFFIX: &str = SHIM_SUFFIX;
 pub const DEFAULT_TARGET_FPS: u32 = 30;
 pub const DEFAULT_MAX_CAPTURE_WIDTH: u32 = 1920;
 pub const DEFAULT_MAX_CAPTURE_HEIGHT: u32 = 1080;
@@ -138,17 +140,38 @@ pub fn native_capture_fps_from_intervals(intervals: &[FrameInterval]) -> Option<
 }
 
 pub fn standardized_label(original_name: &str) -> String {
-    let trimmed = original_name.trim();
-    if trimmed.is_empty() {
-        return format!("Webcam{STANDARDIZED_SUFFIX}");
-    }
-    format!("{trimmed}{STANDARDIZED_SUFFIX}")
+    shim_label(original_name)
 }
 
-/// v4l2loopback `card_label` is limited to 31 bytes. Keep the standardized suffix visible.
+pub fn shim_label(original_name: &str) -> String {
+    let trimmed = original_name.trim();
+    if trimmed.is_empty() {
+        return format!("Webcam{SHIM_SUFFIX}");
+    }
+    format!("{trimmed}{SHIM_SUFFIX}")
+}
+
+/// True when a V4L2 card name belongs to a cam-shim virtual device (current or legacy).
+pub fn is_shim_device_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.contains(SHIM_SUFFIX) {
+        return true;
+    }
+    // Legacy labels from builds before the Shim rename.
+    if name.contains("Linux Std")
+        || name.contains("Linux Standardized")
+        || name.contains("Standardized Camera")
+    {
+        return true;
+    }
+    // Kernel-truncated legacy labels, e.g. "webcam: Fantech Luminous C30 -".
+    name.ends_with(" -") || name.ends_with(" - ")
+}
+
+/// v4l2loopback `card_label` is limited to 31 bytes. Keep the Shim suffix visible.
 pub fn kernel_card_label(display_label: &str) -> String {
     const MAX: usize = 31;
-    const KERNEL_SUFFIX: &str = " - Linux Std";
+    const KERNEL_SUFFIX: &str = SHIM_SUFFIX;
 
     let mut label = display_label.trim().to_string();
     if let Some(stripped) = label.strip_prefix("webcam: ") {
@@ -159,7 +182,7 @@ pub fn kernel_card_label(display_label: &str) -> String {
         return label;
     }
 
-    if label.contains("Linux Standardized") {
+    if label.contains(SHIM_SUFFIX) {
         let prefix_len = MAX.saturating_sub(KERNEL_SUFFIX.len());
         let prefix: String = label.chars().take(prefix_len).collect();
         return format!("{prefix}{KERNEL_SUFFIX}");
@@ -205,10 +228,14 @@ mod tests {
 
     #[test]
     fn standardized_label_uses_suffix() {
-        assert_eq!(
-            standardized_label("HD USB Camera"),
-            "HD USB Camera - Linux Standardized"
-        );
+        assert_eq!(standardized_label("HD USB Camera"), "HD USB Camera - Shim");
+    }
+
+    #[test]
+    fn detects_shim_device_names() {
+        assert!(is_shim_device_name("HD USB Camera - Shim"));
+        assert!(is_shim_device_name("Cam - Linux Std"));
+        assert!(!is_shim_device_name("HD USB Camera"));
     }
 
     #[test]

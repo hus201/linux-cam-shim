@@ -106,7 +106,7 @@ find_cam_shim_bin() {
 
 is_cam_shim_loopback_name() {
   local name="$1"
-  [[ "$name" == *"Linux Std"* || "$name" == *"Standardized"* || "$name" == *" -" ]]
+  [[ "$name" == *" - Shim"* || "$name" == *"Linux Std"* || "$name" == *"Standardized"* || "$name" == *" -" ]]
 }
 
 find_loopback_device() {

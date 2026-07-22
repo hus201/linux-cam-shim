@@ -20,7 +20,7 @@ pub use camera_view::{
 };
 pub use compat::{
     kernel_card_label, kernel_card_label_bytes, loopback_fps_from_intervals,
-    native_capture_fps_from_intervals, standardized_label, CompatReport, CompatStatus,
+    native_capture_fps_from_intervals, shim_label, standardized_label, CompatReport, CompatStatus,
     DEFAULT_MAX_CAPTURE_HEIGHT, DEFAULT_MAX_CAPTURE_WIDTH, DEFAULT_TARGET_FPS,
 };
 pub use devices::{

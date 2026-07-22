@@ -567,18 +567,7 @@ pub fn remove_loopback_device(index: u32) -> Result<()> {
 }
 
 pub fn is_cam_shim_loopback(name: &str) -> bool {
-    let name = name.trim();
-
-    if name.contains("Linux Std")
-        || name.contains("Linux Standardized")
-        || name.contains("Standardized Camera")
-    {
-        return true;
-    }
-
-    // Early cam-shim builds wrote the full display label and the kernel truncated
-    // it to 31 bytes, e.g. "webcam: Fantech Luminous C30 -".
-    name.ends_with(" -") || name.ends_with(" - ")
+    crate::compat::is_shim_device_name(name)
 }
 
 pub fn clean_loopback_devices(all: bool, force: bool) -> Result<CleanReport> {
@@ -1108,7 +1097,7 @@ mod tests {
     fn kernel_label_keeps_suffix() {
         let label = standardized_label("webcam: Fantech Luminous C30");
         let kernel = kernel_card_label(&label);
-        assert!(kernel.contains("Linux Std"));
+        assert!(kernel.contains("Shim"));
         assert!(kernel.len() <= 31);
     }
 

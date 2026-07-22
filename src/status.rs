@@ -370,7 +370,7 @@ mod tests {
         let camera = CameraStatus {
             path: "/dev/video0".into(),
             name: "Test".into(),
-            standardized_name: "Test - Linux Standardized".into(),
+            standardized_name: "Test - Shim".into(),
             needs_shim: true,
             compatible: false,
             role: "physical".into(),

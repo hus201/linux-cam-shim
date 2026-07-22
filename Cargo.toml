@@ -23,7 +23,7 @@ recommends = "v4l-utils, systemd"
 suggests = "v4l2loopback-dkms | v4l2loopback-modules-dkms | v4l2loopback-modules, v4l2loopback-utils, psmisc"
 extended-description = """\
 cam-shim detects UVC/V4L2 webcams that advertise non-standard frame rates
-(e.g. 25 fps only) and exposes a virtual Linux Standardized camera via
+(e.g. 25 fps only) and exposes a virtual `{camera} - Shim` device via
 v4l2loopback. The serve mode runs continuously and manages shims automatically
 when incompatible cameras are plugged in."""
 assets = [
