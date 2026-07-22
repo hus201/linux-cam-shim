@@ -1,20 +1,55 @@
 # linux-cam-shim
 
-Linux webcam compatibility shim. Detects UVC/V4L2 cameras that advertise non-standard frame rates (e.g. 25 fps only) and exposes a virtual **`{camera} - Shim`** device via [v4l2loopback](https://github.com/umlaeute/v4l2loopback).
+**Research prototype — [linux consumer labs](https://github.com/linux-consumer-labs)**
+
+A userland compatibility layer for UVC webcams that break browsers and video calls on Linux.
 
 > **Early stage (v0.3)** — Core relay, hotplug, scan/status UX, stable loopback indices, and YUYV/uncompressed capture are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
 
-## Naming
+## Problem
+
+Everyday users expect a webcam to work when they plug it in. On Linux, some inexpensive UVC devices advertise frame rates like **25 fps** (common in PAL regions) while browsers and WebRTC stacks often expect **30/60 fps**. Negotiation fails, apps crash, or the call starts without video — and the fix usually means understanding V4L2, loopback modules, frame-rate metadata, and which `/dev/video*` node each app actually opened.
+
+That is consumer friction: the hardware works, the kernel sees it, but the stack between plug-in and Google Meet does not bridge the gap predictably.
+
+## Others
+
+Other operating systems treat this as a platform problem, not a user homework assignment.
+
+**macOS** enforces compatibility upstream in the stack Apple controls. Built-in cameras and commonly used externals are validated so frame rates and formats are predictable before FaceTime, Chrome, or Zoom open a picker — a "25 fps only" UVC quirk rarely becomes an app-level failure for typical Mac users. Generic USB webcams can still work, but the failure mode this repo targets is handled before apps negotiate. The invariant is *curated hardware and stack*, not a userland shim.
+
+**Windows** routes almost all camera access through **Windows Media Foundation (WMF)** — a user-mode media pipeline between the kernel driver and applications. Apps negotiate with WMF's advertised capabilities, not raw USB descriptors. Under the hood, a typical UVC path looks like this:
+
+1. The inbox **USB Video Class (UVC) driver** talks to the hardware and exposes raw streams.
+2. **DevProxy** marshals frames and commands from the kernel driver into user mode.
+3. Optional **Device MFTs** (Media Foundation Transforms) — vendor or inbox "Platform DMFT" plugins — can adjust formats, frame rates, and processing before apps see data.
+4. The **Device Transform Manager (DTM)** inside the media source handles **media-type negotiation** (resolution, pixel format, fps) across that chain.
+5. Applications consume frames through **Source Reader**, WinRT **`MediaCapture`**, or legacy DirectShow — all backed by the same WMF media source.
+
+So even when the sensor only outputs 25 fps, the OS has a defined place to normalize or translate what apps are offered. Chrome and Teams do not each re-implement UVC parsing and hope for the best.
+
+**Linux workarounds** — there is no equivalent platform layer. The kernel's UVC driver exposes what the hardware advertises; PipeWire, browsers, and desktop apps negotiate directly against `/dev/video*`. When that breaks, users patch it themselves:
+
+- **`v4l2loopback` + `ffmpeg` / GStreamer** — load the loopback module, capture from the physical camera, re-encode or retime frames, write to a virtual `/dev/videoN`. Works, but you maintain the pipeline, module options, and device paths by hand.
+- **OBS Virtual Camera** — point OBS at the physical webcam, enable its virtual output, select "OBS Virtual Camera" in the meeting app. Common and GUI-friendly, but heavy (full broadcast stack for a compatibility fix) and easy to leave running with wrong settings.
+- **Pick a different app or browser** — sometimes one stack tolerates 25 fps while another crashes; inconsistent and not a fix for the household.
+- **Replace the hardware** — buy a webcam that advertises 30/60 fps. Reliable, but punishes the user for a software negotiation gap.
+
+These are all valid — and all fragile: nothing detects incompatible cameras on plug-in, nothing pairs a physical device with its virtual stand-in, and recovery after a failed `fix` or ghost `/dev/video*` node is still terminal-first. That gap is what motivated this prototype.
+
+## What-if
+
+*What if Linux could close that gap with a small userland layer instead of asking every user to become a V4L2 debugger?*
+
+This prototype tests that hypothesis on top of V4L2 and [v4l2loopback](https://github.com/umlaeute/v4l2loopback) — no kernel fork. See [How it works](#how-it-works) for scan, shim, and hotplug management. Limits today: root, hardware variance, early-stage stability. This repo collects the evidence.
+
+## Quick reference
 
 | Thing | Name |
 |-------|------|
 | Project / repo | `linux-cam-shim` |
 | CLI binary | `cam-shim` |
 | Virtual device label | `{Original Name} - Shim` |
-
-## Problem
-
-Some inexpensive UVC webcams advertise frame rates like **25 fps** (common in PAL regions). Browsers and WebRTC apps often expect **30/60 fps** and may crash or fail negotiation. A virtual camera with normalized frame rate fixes this.
 
 ## Requirements
 
@@ -310,4 +345,4 @@ The systemd unit ships with the `.deb` but stays **disabled by default** until y
 
 ## License
 
-MIT
+All [linux consumer labs](https://github.com/linux-consumer-labs) repositories are licensed under the [MIT License](LICENSE).
