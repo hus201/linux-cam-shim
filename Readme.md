@@ -1,7 +1,5 @@
 # linux-cam-shim
 
-**Research prototype — [linux consumer labs](https://github.com/linux-consumer-labs)**
-
 A userland compatibility layer for UVC webcams that break browsers and video calls on Linux.
 
 > **Early stage (v0.3)** — Core relay, hotplug, scan/status UX, stable loopback indices, and YUYV/uncompressed capture are in place, but this is **not** a stability guarantee yet. `serve` and `fix` require **root** and load kernel modules. Compatibility varies by camera, kernel, and desktop apps. Test on a non-critical system first; keep `cam-shim restore` and `cam-shim doctor` handy if something goes wrong.
@@ -345,4 +343,4 @@ The systemd unit ships with the `.deb` but stays **disabled by default** until y
 
 ## License
 
-All [linux consumer labs](https://github.com/linux-consumer-labs) repositories are licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE).
